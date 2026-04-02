@@ -1,0 +1,32 @@
+name = "opencode-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Object bindings
+[[durable_objects.bindings]]
+name = "SESSION_DO"
+class_name = "SessionDO"
+
+# DO migrations
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionDO"]
+
+# Environment variables (non-secret defaults)
+[vars]
+ENVIRONMENT = "development"
+
+# Secrets (set via `wrangler secret put`):
+# SERVER_PASSWORD       - Basic auth password for the API
+# ANTHROPIC_API_KEY     - Anthropic API key
+# OPENAI_API_KEY        - OpenAI API key
+# GOOGLE_API_KEY        - Google AI API key
+# AGENT_SPACE_URL       - Agent Space management instance URL
+# AGENT_SPACE_API_KEY   - Agent Space API key
+#
+# Cloudflare AI Gateway (provider: "cloudflare-ai-gateway")
+# Matches upstream opencode env var names:
+# CLOUDFLARE_ACCOUNT_ID - Cloudflare account ID
+# CLOUDFLARE_GATEWAY_ID - AI Gateway gateway ID / slug
+# CLOUDFLARE_API_TOKEN  - Cloudflare API token (or CF_AIG_TOKEN)

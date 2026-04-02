@@ -1,0 +1,11 @@
+{
+  "name": "opencode-do-v2",
+  "private": true,
+  "description": "OpenCode on Cloudflare Workers with Agent Space",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "npm run dev --workspace=packages/opencode-worker",
+    "deploy": "npm run deploy --workspace=packages/opencode-worker",
+    "test": "npm run test --workspace=packages/opencode-worker"
+  }
+}
