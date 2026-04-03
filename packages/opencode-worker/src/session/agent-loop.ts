@@ -66,6 +66,15 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<void> {
           })
           break
         }
+        case "reasoning-delta": {
+          await onEvent({
+            type: "reasoning.delta",
+            sessionId,
+            messageId: assistantMsgId,
+            delta: (part as any).text || "",
+          } as any)
+          break
+        }
         case "tool-call": {
           const tc: ToolCallInfo = {
             id: part.toolCallId,

@@ -59,22 +59,38 @@ interface StoredMessage {
     finish?: string
     summary?: { diffs: unknown[] }
   }
-  parts: Array<{
-    id: string
-    sessionID: string
-    messageID: string
-    type: string
-    text?: string
+  parts: Array<StoredPart>
+}
+
+type StoredPart = {
+  id: string
+  sessionID: string
+  messageID: string
+  type: string
+  text?: string
+  time?: { start: number; end?: number }
+  reason?: string
+  cost?: number
+  tokens?: {
+    input: number
+    output: number
+    reasoning: number
+    cache: { read: number; write: number }
+  }
+  // tool part fields (upstream shape)
+  callID?: string
+  tool?: string
+  state?: {
+    status: string
+    input: Record<string, unknown>
+    raw?: string
+    title?: string
+    output?: string
+    metadata?: Record<string, unknown>
     time?: { start: number; end?: number }
-    reason?: string
-    cost?: number
-    tokens?: {
-      input: number
-      output: number
-      reasoning: number
-      cache: { read: number; write: number }
-    }
-  }>
+    error?: string
+  }
+  metadata?: Record<string, unknown>
 }
 
 interface Session {
@@ -407,18 +423,19 @@ export class SessionDO extends DurableObject<Env> {
 
     await this.broadcast({
       type: "message.updated",
-      properties: { info: userMessage.info },
+      properties: { sessionID: sessionId, info: userMessage.info },
     })
 
     await this.broadcast({
       type: "message.part.updated",
-      properties: { part: userMessage.parts[0] },
+      properties: { sessionID: sessionId, part: userMessage.parts[0], time: Date.now() },
     })
 
     // User message with summary signals "not queued"
     await this.broadcast({
       type: "message.updated",
       properties: {
+        sessionID: sessionId,
         info: { ...userMessage.info, summary: { diffs: [] } },
       },
     })
@@ -449,7 +466,7 @@ export class SessionDO extends DurableObject<Env> {
 
     await this.broadcast({
       type: "message.updated",
-      properties: { info: assistantInfo },
+      properties: { sessionID: sessionId, info: assistantInfo },
     })
 
     await this.broadcast({
@@ -462,6 +479,8 @@ export class SessionDO extends DurableObject<Env> {
     await this.broadcast({
       type: "message.part.updated",
       properties: {
+        sessionID: sessionId,
+        time: Date.now(),
         part: {
           id: stepStartPartId,
           sessionID: sessionId,
@@ -474,18 +493,10 @@ export class SessionDO extends DurableObject<Env> {
     // ── Step 4: Run AI ───────────────────────────────────────────
 
     let fullText = ""
-    // Track tool invocation parts for SSE broadcast + storage
-    const toolInvocationParts: Array<{
-      id: string
-      sessionID: string
-      messageID: string
-      type: string
-      tool?: string
-      input?: Record<string, unknown>
-      state?: string
-      output?: string
-      time?: { start: number; end?: number }
-    }> = []
+    let reasoningText = ""
+    const reasoningPartId = generateId("prt")
+    // Track tool parts (upstream shape) for storage
+    const toolParts: StoredPart[] = []
     // Map agent-loop toolCallId → our part ID
     const toolIdMap = new Map<string, string>()
 
@@ -505,11 +516,11 @@ export class SessionDO extends DurableObject<Env> {
             .map((p) => p.text || "")
             .join("\n") || "",
         toolCalls: m.parts
-          .filter((p) => p.type === "tool-invocation" && (p as any).tool)
-          .map((p: any) => ({ id: p.id, name: p.tool, arguments: p.input || {} })),
+          .filter((p) => p.type === "tool" && p.tool)
+          .map((p) => ({ id: p.callID || p.id, name: p.tool!, arguments: p.state?.input || {} })),
         toolResults: m.parts
-          .filter((p) => p.type === "tool-invocation" && (p as any).output)
-          .map((p: any) => ({ callId: p.id, name: p.tool, result: p.output || "" })),
+          .filter((p) => p.type === "tool" && p.state?.status === "completed")
+          .map((p) => ({ callId: p.callID || p.id, name: p.tool!, result: p.state?.output || "" })),
         createdAt: m.info.time.created,
       }))
 
@@ -533,10 +544,23 @@ export class SessionDO extends DurableObject<Env> {
               const delta = (event as any).delta as string
               fullText += delta
               console.log(`[message.delta] +${delta.length} chars, total: ${fullText.length}`)
-              // Broadcast accumulated text (not delta)
+              // Broadcast delta (client accumulates via message.part.delta)
+              await this.broadcast({
+                type: "message.part.delta",
+                properties: {
+                  sessionID: sessionId,
+                  messageID: assistantMessageId,
+                  partID: assistantTextPartId,
+                  field: "text",
+                  delta,
+                },
+              })
+              // Also broadcast full part so late-joining clients get current state
               await this.broadcast({
                 type: "message.part.updated",
                 properties: {
+                  sessionID: sessionId,
+                  time: Date.now(),
                   part: {
                     id: assistantTextPartId,
                     sessionID: sessionId,
@@ -549,29 +573,60 @@ export class SessionDO extends DurableObject<Env> {
               })
               break
             }
+            case "reasoning.delta" as string: {
+              const delta = (event as any).delta as string
+              if (!delta) break
+              reasoningText += delta
+              await this.broadcast({
+                type: "message.part.delta",
+                properties: {
+                  sessionID: sessionId,
+                  messageID: assistantMessageId,
+                  partID: reasoningPartId,
+                  field: "text",
+                  delta,
+                },
+              })
+              await this.broadcast({
+                type: "message.part.updated",
+                properties: {
+                  sessionID: sessionId,
+                  time: Date.now(),
+                  part: {
+                    id: reasoningPartId,
+                    sessionID: sessionId,
+                    messageID: assistantMessageId,
+                    type: "reasoning",
+                    text: reasoningText,
+                    time: { start: now, end: Date.now() },
+                  },
+                },
+              })
+              break
+            }
             case "tool.called": {
               const tc = (event as any).tool as {
                 id: string
                 name: string
                 arguments: Record<string, unknown>
               }
-              const toolPartId = generateId("prt")
-              toolIdMap.set(tc.id, toolPartId)
-              const toolPart = {
-                id: toolPartId,
+              const partId = generateId("prt")
+              toolIdMap.set(tc.id, partId)
+              const raw = JSON.stringify(tc.arguments)
+              const part: StoredPart = {
+                id: partId,
                 sessionID: sessionId,
                 messageID: assistantMessageId,
-                type: "tool-invocation",
+                type: "tool",
+                callID: tc.id,
                 tool: tc.name,
-                input: tc.arguments,
-                state: "pending",
-                time: { start: Date.now() },
+                state: { status: "running", input: tc.arguments, raw, time: { start: Date.now() } },
               }
-              toolInvocationParts.push(toolPart)
-              console.log(`[tool.called] ${tc.name} (${toolPartId})`)
+              toolParts.push(part)
+              console.log(`[tool.called] ${tc.name} (${partId})`)
               await this.broadcast({
                 type: "message.part.updated",
-                properties: { part: toolPart },
+                properties: { sessionID: sessionId, time: Date.now(), part },
               })
               break
             }
@@ -581,18 +636,20 @@ export class SessionDO extends DurableObject<Env> {
                 name: string
                 result: string
               }
-              const toolPartId = toolIdMap.get(tr.callId)
-              if (toolPartId) {
-                // Find and update existing tool part
-                const existing = toolInvocationParts.find(
-                  (p) => p.id === toolPartId,
-                )
+              const partId = toolIdMap.get(tr.callId)
+              if (partId) {
+                const existing = toolParts.find((p) => p.id === partId)
                 if (existing) {
-                  existing.state = "completed"
-                  existing.output = tr.result
-                  existing.time = {
-                    start: existing.time?.start || Date.now(),
-                    end: Date.now(),
+                  existing.state = {
+                    status: "completed",
+                    input: existing.state?.input || {},
+                    output: tr.result,
+                    title: tr.name,
+                    metadata: {},
+                    time: {
+                      start: existing.state?.time?.start || Date.now(),
+                      end: Date.now(),
+                    },
                   }
                 }
                 console.log(
@@ -601,20 +658,22 @@ export class SessionDO extends DurableObject<Env> {
                 await this.broadcast({
                   type: "message.part.updated",
                   properties: {
-                    part: {
-                      id: toolPartId,
+                    sessionID: sessionId,
+                    time: Date.now(),
+                    part: existing || {
+                      id: partId,
                       sessionID: sessionId,
                       messageID: assistantMessageId,
-                      type: "tool-invocation",
+                      type: "tool",
+                      callID: tr.callId,
                       tool: tr.name,
-                      input:
-                        existing?.input ||
-                        ({} as Record<string, unknown>),
-                      state: "completed",
-                      output: tr.result,
-                      time: {
-                        start: existing?.time?.start || Date.now(),
-                        end: Date.now(),
+                      state: {
+                        status: "completed",
+                        input: {},
+                        output: tr.result,
+                        title: tr.name,
+                        metadata: {},
+                        time: { start: Date.now(), end: Date.now() },
                       },
                     },
                   },
@@ -671,7 +730,7 @@ export class SessionDO extends DurableObject<Env> {
       fullText = "I encountered an error generating a response."
     }
 
-    console.log(`[handleMessage] completed in ${endTime - now}ms, tools: ${toolInvocationParts.length}, text length: ${fullText.length}`)
+    console.log(`[handleMessage] completed in ${endTime - now}ms, tools: ${toolParts.length}, text length: ${fullText.length}`)
     console.log(`[response] ${fullText.slice(0, 200)}${fullText.length > 200 ? '...' : ''}`)
 
     // ── Step 5: Finalize ─────────────────────────────────────────
@@ -680,6 +739,8 @@ export class SessionDO extends DurableObject<Env> {
     await this.broadcast({
       type: "message.part.updated",
       properties: {
+        sessionID: sessionId,
+        time: endTime,
         part: {
           id: assistantTextPartId,
           sessionID: sessionId,
@@ -695,6 +756,8 @@ export class SessionDO extends DurableObject<Env> {
     await this.broadcast({
       type: "message.part.updated",
       properties: {
+        sessionID: sessionId,
+        time: endTime,
         part: {
           id: stepFinishPartId,
           sessionID: sessionId,
@@ -712,22 +775,23 @@ export class SessionDO extends DurableObject<Env> {
       },
     })
 
-    // Build all parts: step-start + tool invocations + text + step-finish
-    const allParts: StoredMessage["parts"] = [
+    // Build all parts: step-start + reasoning? + tool parts + text + step-finish
+    const allParts: StoredPart[] = [
       {
         id: stepStartPartId,
         sessionID: sessionId,
         messageID: assistantMessageId,
         type: "step-start",
       },
-      ...toolInvocationParts.map((tp) => ({
-        id: tp.id,
+      ...(reasoningText ? [{
+        id: reasoningPartId,
         sessionID: sessionId,
         messageID: assistantMessageId,
-        type: tp.type,
-        text: tp.output,
-        time: tp.time,
-      })),
+        type: "reasoning",
+        text: reasoningText,
+        time: { start: now, end: endTime },
+      }] : []),
+      ...toolParts,
       {
         id: assistantTextPartId,
         sessionID: sessionId,
@@ -767,6 +831,7 @@ export class SessionDO extends DurableObject<Env> {
     await this.broadcast({
       type: "message.updated",
       properties: {
+        sessionID: sessionId,
         info: {
           ...assistantInfo,
           time: { created: now, completed: endTime },
