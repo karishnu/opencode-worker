@@ -6,6 +6,9 @@ import type {
   CommitLogEntry,
   GitStatusEntry,
   PatchResult,
+  DeployResult,
+  UndeployResult,
+  DeploymentInfo,
 } from "../types"
 
 /**
@@ -35,11 +38,15 @@ export class AgentSpaceWorkspaceAdapter implements WorkspaceAdapter {
     path: string,
     opts?: { offset?: number; limit?: number },
   ): Promise<string> {
-    const res = await fetch(this.url(path), { headers: this.headers() })
+    const url = this.url(path)
+    console.log(`[space:readFile] GET ${url}`)
+    const res = await fetch(url, { headers: this.headers() })
     if (!res.ok) {
       const err = await res.text()
+      console.error(`[space:readFile] ${res.status} ${path}: ${err}`)
       throw new Error(`Failed to read ${path}: ${err}`)
     }
+    console.log(`[space:readFile] ${res.status} ${path}`)
     let text = await res.text()
 
     if (opts?.offset !== undefined || opts?.limit !== undefined) {
@@ -59,16 +66,20 @@ export class AgentSpaceWorkspaceAdapter implements WorkspaceAdapter {
     path: string,
     content: string,
   ): Promise<{ path: string; size: number }> {
-    const res = await fetch(this.url(path), {
+    const url = this.url(path)
+    console.log(`[space:writeFile] PUT ${url} (${content.length} bytes)`)
+    const res = await fetch(url, {
       method: "PUT",
       headers: this.headers(),
       body: content,
     })
     if (!res.ok) {
       const err = await res.text()
+      console.error(`[space:writeFile] ${res.status} ${path}: ${err}`)
       throw new Error(`Failed to write ${path}: ${err}`)
     }
     const data = (await res.json()) as { path: string; size: number }
+    console.log(`[space:writeFile] ${res.status} ${path} → ${data.size} bytes`)
     return data
   }
 
@@ -128,12 +139,17 @@ export class AgentSpaceWorkspaceAdapter implements WorkspaceAdapter {
 
   async list(prefix?: string): Promise<FileEntry[]> {
     const queryPath = prefix ? `${prefix}?list` : "?list"
-    const res = await fetch(this.url(queryPath), { headers: this.headers() })
+    const url = this.url(queryPath)
+    console.log(`[space:list] GET ${url}`)
+    const res = await fetch(url, { headers: this.headers() })
     if (!res.ok) {
       const err = await res.text()
+      console.error(`[space:list] ${res.status}: ${err}`)
       throw new Error(`Failed to list files: ${err}`)
     }
-    return (await res.json()) as FileEntry[]
+    const data = (await res.json()) as FileEntry[]
+    console.log(`[space:list] ${res.status} → ${data.length} entries`)
+    return data
   }
 
   async patch(diff: string): Promise<PatchResult> {
@@ -187,34 +203,109 @@ export class AgentSpaceWorkspaceAdapter implements WorkspaceAdapter {
     if (author) {
       body.author = author
     }
-    const res = await fetch(this.url("?cmd=commit"), {
+    const url = this.url("?cmd=commit")
+    console.log(`[space:gitCommit] POST ${url}`, JSON.stringify(body))
+    const res = await fetch(url, {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     })
     if (!res.ok) {
       const err = await res.text()
+      console.error(`[space:gitCommit] ${res.status}: ${err}`)
       throw new Error(`Git commit failed: ${err}`)
     }
-    return (await res.json()) as CommitResult
+    const data = (await res.json()) as CommitResult
+    console.log(`[space:gitCommit] ${res.status} → ${JSON.stringify(data)}`)
+    return data
   }
 
   async gitLog(limit?: number): Promise<CommitLogEntry[]> {
     const url = limit
       ? this.url(`?cmd=log&limit=${limit}`)
       : this.url("?cmd=log")
+    console.log(`[space:gitLog] GET ${url}`)
     const res = await fetch(url, { headers: this.headers() })
     if (!res.ok) {
       const err = await res.text()
+      console.error(`[space:gitLog] ${res.status}: ${err}`)
       throw new Error(`Git log failed: ${err}`)
     }
-    return (await res.json()) as CommitLogEntry[]
+    const data = (await res.json()) as CommitLogEntry[]
+    console.log(`[space:gitLog] ${res.status} → ${data.length} entries`)
+    return data
   }
 
   async gitStatus(): Promise<GitStatusEntry[]> {
     // Use ?list endpoint like DO-Git does (returns files with mtime)
     const files = await this.list()
     return files.map((f) => ({ path: f.path, mtime: f.mtime }))
+  }
+
+  // ── Deploy ──────────────────────────────────────────────────────
+
+  async deploy(branch: string): Promise<DeployResult> {
+    const url = this.url("?cmd=deploy")
+    console.log(`[space:deploy] POST ${url} branch=${branch}`)
+    const res = await fetch(url, {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ branch }),
+    })
+    if (!res.ok) {
+      const err = await res.text()
+      console.error(`[space:deploy] ${res.status}: ${err}`)
+      throw new Error(`Deploy failed: ${err}`)
+    }
+    const data = (await res.json()) as DeployResult
+    console.log(`[space:deploy] ${res.status} → ${JSON.stringify(data)}`)
+    return data
+  }
+
+  async undeploy(branch: string): Promise<UndeployResult> {
+    const url = this.url("?cmd=undeploy")
+    console.log(`[space:undeploy] POST ${url} branch=${branch}`)
+    const res = await fetch(url, {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ branch }),
+    })
+    if (!res.ok) {
+      const err = await res.text()
+      console.error(`[space:undeploy] ${res.status}: ${err}`)
+      throw new Error(`Undeploy failed: ${err}`)
+    }
+    const data = (await res.json()) as UndeployResult
+    console.log(`[space:undeploy] ${res.status} → ${JSON.stringify(data)}`)
+    return data
+  }
+
+  async listDeployments(): Promise<DeploymentInfo[]> {
+    const url = this.url("?cmd=list_deployments")
+    console.log(`[space:listDeployments] GET ${url}`)
+    const res = await fetch(url, { headers: this.headers() })
+    if (!res.ok) {
+      const err = await res.text()
+      console.error(`[space:listDeployments] ${res.status}: ${err}`)
+      throw new Error(`List deployments failed: ${err}`)
+    }
+    const data = (await res.json()) as DeploymentInfo[]
+    console.log(`[space:listDeployments] ${res.status} → ${data.length} deployments`)
+    return data
+  }
+
+  async getDeployment(branch: string): Promise<DeploymentInfo> {
+    const url = this.url(`?cmd=get_deployment&branch=${encodeURIComponent(branch)}`)
+    console.log(`[space:getDeployment] GET ${url}`)
+    const res = await fetch(url, { headers: this.headers() })
+    if (!res.ok) {
+      const err = await res.text()
+      console.error(`[space:getDeployment] ${res.status}: ${err}`)
+      throw new Error(`Get deployment failed: ${err}`)
+    }
+    const data = (await res.json()) as DeploymentInfo
+    console.log(`[space:getDeployment] ${res.status} → ${JSON.stringify(data)}`)
+    return data
   }
 }
 

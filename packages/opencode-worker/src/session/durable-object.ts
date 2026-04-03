@@ -1,8 +1,9 @@
 import { DurableObject } from "cloudflare:workers"
 import type { Env } from "../env"
-import type { SessionMessage, SessionEvent } from "../types"
+import type { SessionEvent, SpaceMapping, StoredMessage, StoredPart } from "../types"
 import { getLanguageModel } from "../provider/registry"
 import { AgentSpaceWorkspaceAdapter } from "../adapters/workspace-agent-space"
+import { OrchestratorMcpClient } from "../adapters/orchestrator-mcp-client"
 import { createTools } from "../tools"
 import { runAgentLoop } from "./agent-loop"
 
@@ -34,64 +35,7 @@ function generateId(prefix: "msg" | "prt" | "ses"): string {
   return `${prefix}_${timeHex}${randomPart}`
 }
 
-// ── Stored message shape (matches TUI expectations) ───────────────
-
-interface StoredMessage {
-  info: {
-    id: string
-    sessionID: string
-    role: "user" | "assistant"
-    time: { created: number; completed?: number }
-    agent: string
-    model?: { providerID: string; modelID: string }
-    parentID?: string
-    modelID?: string
-    providerID?: string
-    mode?: string
-    path?: { cwd: string; root: string }
-    cost?: number
-    tokens?: {
-      input: number
-      output: number
-      reasoning: number
-      cache: { read: number; write: number }
-    }
-    finish?: string
-    summary?: { diffs: unknown[] }
-  }
-  parts: Array<StoredPart>
-}
-
-type StoredPart = {
-  id: string
-  sessionID: string
-  messageID: string
-  type: string
-  text?: string
-  time?: { start: number; end?: number }
-  reason?: string
-  cost?: number
-  tokens?: {
-    input: number
-    output: number
-    reasoning: number
-    cache: { read: number; write: number }
-  }
-  // tool part fields (upstream shape)
-  callID?: string
-  tool?: string
-  state?: {
-    status: string
-    input: Record<string, unknown>
-    raw?: string
-    title?: string
-    output?: string
-    metadata?: Record<string, unknown>
-    time?: { start: number; end?: number }
-    error?: string
-  }
-  metadata?: Record<string, unknown>
-}
+// StoredMessage and StoredPart types imported from ../types
 
 interface Session {
   id: string
@@ -155,6 +99,18 @@ export class SessionDO extends DurableObject<Env> {
         PRIMARY KEY (session_id, key)
       )
     `)
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS session_spaces (
+        session_id TEXT NOT NULL,
+        space_name TEXT NOT NULL,
+        space_url TEXT NOT NULL,
+        space_api_key TEXT NOT NULL,
+        PRIMARY KEY (session_id, space_name)
+      )
+    `)
+    this.ctx.storage.sql.exec(
+      `CREATE INDEX IF NOT EXISTS idx_session_spaces_session ON session_spaces(session_id)`,
+    )
   }
 
   // ── fetch() — routes SSE + message requests ────────────────────
@@ -316,6 +272,59 @@ export class SessionDO extends DurableObject<Env> {
       key,
       value,
     )
+  }
+
+  // ── Session ↔ Space Mappings ────────────────────────────────────
+
+  addSessionSpace(sessionId: string, spaceName: string, spaceUrl: string, spaceApiKey: string): void {
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO session_spaces (session_id, space_name, space_url, space_api_key) VALUES (?, ?, ?, ?)`,
+      sessionId,
+      spaceName,
+      spaceUrl,
+      spaceApiKey,
+    )
+  }
+
+  removeSessionSpace(sessionId: string, spaceName: string): void {
+    this.ctx.storage.sql.exec(
+      `DELETE FROM session_spaces WHERE session_id = ? AND space_name = ?`,
+      sessionId,
+      spaceName,
+    )
+  }
+
+  getSessionSpaces(sessionId: string): SpaceMapping[] {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT session_id, space_name, space_url, space_api_key FROM session_spaces WHERE session_id = ?`,
+        sessionId,
+      )
+      .toArray()
+    return rows.map((r) => ({
+      sessionId: r.session_id as string,
+      spaceName: r.space_name as string,
+      spaceUrl: r.space_url as string,
+      spaceApiKey: r.space_api_key as string,
+    }))
+  }
+
+  getSpaceForSession(sessionId: string, spaceName: string): SpaceMapping | null {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT session_id, space_name, space_url, space_api_key FROM session_spaces WHERE session_id = ? AND space_name = ?`,
+        sessionId,
+        spaceName,
+      )
+      .toArray()
+    if (rows.length === 0) return null
+    const r = rows[0]
+    return {
+      sessionId: r.session_id as string,
+      spaceName: r.space_name as string,
+      spaceUrl: r.space_url as string,
+      spaceApiKey: r.space_api_key as string,
+    }
   }
 
   // ── Get Messages (V2 format for TUI) ──────────────────────────
@@ -495,8 +504,10 @@ export class SessionDO extends DurableObject<Env> {
     let fullText = ""
     let reasoningText = ""
     const reasoningPartId = generateId("prt")
-    // Track tool parts (upstream shape) for storage
-    const toolParts: StoredPart[] = []
+    // Parts in stream order (text + tool interleaved, like upstream)
+    const orderedParts: StoredPart[] = []
+    // Current text part being streamed (null between segments)
+    let currentTextPart: StoredPart | null = null
     // Map agent-loop toolCallId → our part ID
     const toolIdMap = new Map<string, string>()
 
@@ -504,64 +515,79 @@ export class SessionDO extends DurableObject<Env> {
       if (this.abortController) this.abortController.abort()
       this.abortController = new AbortController()
 
-      // Build history from stored messages
-      const storedMsgs = this.getMessagesForSession(sessionId)
-      const history: SessionMessage[] = storedMsgs.map((m) => ({
-        id: m.info.id,
-        sessionId,
-        role: m.info.role,
-        content:
-          m.parts
-            .filter((p) => p.type === "text")
-            .map((p) => p.text || "")
-            .join("\n") || "",
-        toolCalls: m.parts
-          .filter((p) => p.type === "tool" && p.tool)
-          .map((p) => ({ id: p.callID || p.id, name: p.tool!, arguments: p.state?.input || {} })),
-        toolResults: m.parts
-          .filter((p) => p.type === "tool" && p.state?.status === "completed")
-          .map((p) => ({ callId: p.callID || p.id, name: p.tool!, result: p.state?.output || "" })),
-        createdAt: m.info.time.created,
-      }))
+      // getMessages callback for agent loop (re-reads from DB each call)
+      const getMessages = () => this.getMessagesForSession(sessionId)
 
       const model = getLanguageModel(providerId, modelId, this.env)
-      const meta = this.getSessionMeta(sessionId)
-      const workspace = new AgentSpaceWorkspaceAdapter(
-        meta.spaceUrl || "",
-        meta.spaceApiKey || "",
+      const orchestrator = new OrchestratorMcpClient(
+        this.env.ORCHESTRATOR_URL,
+        this.env.ORCHESTRATOR_API_KEY,
       )
-      const tools = createTools(workspace)
+      const resolveWorkspace = (spaceName: string) => {
+        const mapping = this.getSpaceForSession(sessionId, spaceName)
+        if (!mapping) {
+          throw new Error(`Space "${spaceName}" is not attached to this session. Use attach_space or create_space first.`)
+        }
+        return new AgentSpaceWorkspaceAdapter(mapping.spaceUrl, mapping.spaceApiKey)
+      }
+      const spaceStore = {
+        add: (name: string, url: string, apiKey: string) => this.addSessionSpace(sessionId, name, url, apiKey),
+        remove: (name: string) => this.removeSessionSpace(sessionId, name),
+        list: () => this.getSessionSpaces(sessionId),
+        get: (name: string) => this.getSpaceForSession(sessionId, name),
+      }
+      const tools = createTools({ resolveWorkspace, orchestrator, sessionId, spaceStore })
 
       await runAgentLoop({
         model,
         tools,
-        history,
+        getMessages,
         sessionId,
         signal: this.abortController.signal,
         onEvent: async (event: SessionEvent) => {
           switch (event.type) {
+            case "text.start": {
+              // Create a new text part for this segment (upstream pattern)
+              const partId = generateId("prt")
+              currentTextPart = {
+                id: partId,
+                sessionID: sessionId,
+                messageID: assistantMessageId,
+                type: "text",
+                text: "",
+                time: { start: Date.now() },
+              }
+              orderedParts.push(currentTextPart)
+              await this.broadcast({
+                type: "message.part.updated",
+                properties: { sessionID: sessionId, time: Date.now(), part: currentTextPart },
+              })
+              break
+            }
             case "message.delta": {
               const delta = (event as any).delta as string
               fullText += delta
+              if (currentTextPart) {
+                currentTextPart.text = (currentTextPart.text || "") + delta
+              }
+              const partId = currentTextPart?.id || assistantTextPartId
               console.log(`[message.delta] +${delta.length} chars, total: ${fullText.length}`)
-              // Broadcast delta (client accumulates via message.part.delta)
               await this.broadcast({
                 type: "message.part.delta",
                 properties: {
                   sessionID: sessionId,
                   messageID: assistantMessageId,
-                  partID: assistantTextPartId,
+                  partID: partId,
                   field: "text",
                   delta,
                 },
               })
-              // Also broadcast full part so late-joining clients get current state
               await this.broadcast({
                 type: "message.part.updated",
                 properties: {
                   sessionID: sessionId,
                   time: Date.now(),
-                  part: {
+                  part: currentTextPart || {
                     id: assistantTextPartId,
                     sessionID: sessionId,
                     messageID: assistantMessageId,
@@ -571,6 +597,18 @@ export class SessionDO extends DurableObject<Env> {
                   },
                 },
               })
+              break
+            }
+            case "text.end": {
+              if (currentTextPart) {
+                currentTextPart.text = (currentTextPart.text || "").trimEnd()
+                currentTextPart.time = { start: currentTextPart.time?.start || Date.now(), end: Date.now() }
+                await this.broadcast({
+                  type: "message.part.updated",
+                  properties: { sessionID: sessionId, time: Date.now(), part: currentTextPart },
+                })
+                currentTextPart = null
+              }
               break
             }
             case "reasoning.delta" as string: {
@@ -622,7 +660,7 @@ export class SessionDO extends DurableObject<Env> {
                 tool: tc.name,
                 state: { status: "running", input: tc.arguments, raw, time: { start: Date.now() } },
               }
-              toolParts.push(part)
+              orderedParts.push(part)
               console.log(`[tool.called] ${tc.name} (${partId})`)
               await this.broadcast({
                 type: "message.part.updated",
@@ -635,25 +673,32 @@ export class SessionDO extends DurableObject<Env> {
                 callId: string
                 name: string
                 result: string
+                isError?: boolean
               }
               const partId = toolIdMap.get(tr.callId)
               if (partId) {
-                const existing = toolParts.find((p) => p.id === partId)
+                const existing = orderedParts.find((p) => p.id === partId)
+                const start = existing?.state?.time?.start || Date.now()
                 if (existing) {
-                  existing.state = {
-                    status: "completed",
-                    input: existing.state?.input || {},
-                    output: tr.result,
-                    title: tr.name,
-                    metadata: {},
-                    time: {
-                      start: existing.state?.time?.start || Date.now(),
-                      end: Date.now(),
-                    },
-                  }
+                  existing.state = tr.isError
+                    ? {
+                        status: "error",
+                        input: existing.state?.input || {},
+                        error: tr.result,
+                        metadata: {},
+                        time: { start, end: Date.now() },
+                      }
+                    : {
+                        status: "completed",
+                        input: existing.state?.input || {},
+                        output: tr.result,
+                        title: tr.name,
+                        metadata: {},
+                        time: { start, end: Date.now() },
+                      }
                 }
                 console.log(
-                  `[tool.result] ${tr.name} → ${(tr.result || "").slice(0, 80)}...`,
+                  `[tool.result] ${tr.name}${tr.isError ? " ERROR" : ""} → ${(tr.result || "").slice(0, 80)}...`,
                 )
                 await this.broadcast({
                   type: "message.part.updated",
@@ -667,14 +712,9 @@ export class SessionDO extends DurableObject<Env> {
                       type: "tool",
                       callID: tr.callId,
                       tool: tr.name,
-                      state: {
-                        status: "completed",
-                        input: {},
-                        output: tr.result,
-                        title: tr.name,
-                        metadata: {},
-                        time: { start: Date.now(), end: Date.now() },
-                      },
+                      state: tr.isError
+                        ? { status: "error", input: {}, error: tr.result, time: { start: Date.now(), end: Date.now() } }
+                        : { status: "completed", input: {}, output: tr.result, title: tr.name, metadata: {}, time: { start: Date.now(), end: Date.now() } },
                     },
                   },
                 })
@@ -686,34 +726,6 @@ export class SessionDO extends DurableObject<Env> {
               break
             }
           }
-        },
-        appendMessage: async (msg) => {
-          // Store intermediate messages (tool-round assistant messages)
-          // so GET /session/:id/message returns complete history
-          const storedMsg: StoredMessage = {
-            info: {
-              id: msg.id,
-              sessionID: sessionId,
-              role: msg.role as "user" | "assistant",
-              time: { created: msg.createdAt },
-              agent,
-              model: { providerID: providerId, modelID: modelId },
-              parentID: userMessageId,
-            },
-            parts: [],
-          }
-          if (msg.content) {
-            storedMsg.parts.push({
-              id: generateId("prt"),
-              sessionID: sessionId,
-              messageID: msg.id,
-              type: "text",
-              text: msg.content,
-              time: { start: msg.createdAt, end: Date.now() },
-            })
-          }
-          this.storeMessage(storedMsg)
-          return { ...msg, sessionId }
         },
       })
     } catch (e) {
@@ -730,27 +742,29 @@ export class SessionDO extends DurableObject<Env> {
       fullText = "I encountered an error generating a response."
     }
 
-    console.log(`[handleMessage] completed in ${endTime - now}ms, tools: ${toolParts.length}, text length: ${fullText.length}`)
+    const toolCount = orderedParts.filter((p) => p.type === "tool").length
+    console.log(`[handleMessage] completed in ${endTime - now}ms, tools: ${toolCount}, text length: ${fullText.length}`)
     console.log(`[response] ${fullText.slice(0, 200)}${fullText.length > 200 ? '...' : ''}`)
 
     // ── Step 5: Finalize ─────────────────────────────────────────
 
-    // Final text broadcast
-    await this.broadcast({
-      type: "message.part.updated",
-      properties: {
+    // Final text broadcast — only if no text parts were created via text.start
+    // (fallback for edge case where text-start event was not emitted)
+    if (!orderedParts.some((p) => p.type === "text")) {
+      const fallback: StoredPart = {
+        id: assistantTextPartId,
         sessionID: sessionId,
-        time: endTime,
-        part: {
-          id: assistantTextPartId,
-          sessionID: sessionId,
-          messageID: assistantMessageId,
-          type: "text",
-          text: fullText,
-          time: { start: now, end: endTime },
-        },
-      },
-    })
+        messageID: assistantMessageId,
+        type: "text",
+        text: fullText,
+        time: { start: now, end: endTime },
+      }
+      orderedParts.push(fallback)
+      await this.broadcast({
+        type: "message.part.updated",
+        properties: { sessionID: sessionId, time: endTime, part: fallback },
+      })
+    }
 
     // step-finish
     await this.broadcast({
@@ -775,7 +789,7 @@ export class SessionDO extends DurableObject<Env> {
       },
     })
 
-    // Build all parts: step-start + reasoning? + tool parts + text + step-finish
+    // Build all parts in stream order: step-start + reasoning? + orderedParts + step-finish
     const allParts: StoredPart[] = [
       {
         id: stepStartPartId,
@@ -791,15 +805,7 @@ export class SessionDO extends DurableObject<Env> {
         text: reasoningText,
         time: { start: now, end: endTime },
       }] : []),
-      ...toolParts,
-      {
-        id: assistantTextPartId,
-        sessionID: sessionId,
-        messageID: assistantMessageId,
-        type: "text",
-        text: fullText,
-        time: { start: now, end: endTime },
-      },
+      ...orderedParts,
       {
         id: stepFinishPartId,
         sessionID: sessionId,

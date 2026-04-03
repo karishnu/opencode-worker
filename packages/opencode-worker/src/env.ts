@@ -8,9 +8,9 @@ export interface Env {
   // Durable Object bindings
   SESSION_DO: DurableObjectNamespace
 
-  // Agent Space configuration
-  AGENT_SPACE_URL: string
-  AGENT_SPACE_API_KEY: string
+  // Orchestrator (Agent Space management) configuration
+  ORCHESTRATOR_URL: string
+  ORCHESTRATOR_API_KEY: string
 
   // LLM provider API keys
   ANTHROPIC_API_KEY?: string

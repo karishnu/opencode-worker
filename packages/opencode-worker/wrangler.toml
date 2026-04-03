@@ -22,8 +22,8 @@ ENVIRONMENT = "development"
 # ANTHROPIC_API_KEY     - Anthropic API key
 # OPENAI_API_KEY        - OpenAI API key
 # GOOGLE_API_KEY        - Google AI API key
-# AGENT_SPACE_URL       - Agent Space management instance URL
-# AGENT_SPACE_API_KEY   - Agent Space API key
+# ORCHESTRATOR_URL      - Orchestrator (Agent Space management) instance URL
+# ORCHESTRATOR_API_KEY  - Orchestrator API key (Bearer token for MCP)
 #
 # Cloudflare AI Gateway (provider: "cloudflare-ai-gateway")
 # Matches upstream opencode env var names:

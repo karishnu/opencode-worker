@@ -50,20 +50,54 @@ export interface WorkspaceAdapter {
   gitCommit(message: string, author?: { name: string; email: string }): Promise<CommitResult>
   gitLog(limit?: number): Promise<CommitLogEntry[]>
   gitStatus(): Promise<GitStatusEntry[]>
+  deploy(branch: string): Promise<DeployResult>
+  undeploy(branch: string): Promise<UndeployResult>
+  listDeployments(): Promise<DeploymentInfo[]>
+  getDeployment(branch: string): Promise<DeploymentInfo>
+}
+
+// ── Deployment Types ────────────────────────────────────────────────
+
+export interface DeployResult {
+  branch: string
+  url?: string
+  [key: string]: unknown
+}
+
+export interface UndeployResult {
+  branch: string
+  [key: string]: unknown
+}
+
+export interface DeploymentInfo {
+  branch: string
+  [key: string]: unknown
 }
 
 // ── Space Manager Interface ─────────────────────────────────────────
 
 export interface SpaceInfo {
   name: string
+  scriptName?: string
   url: string
   apiKey?: string
+  createdOn?: string
+  modifiedOn?: string
 }
 
 export interface SpaceManager {
-  createSpace(name: string): Promise<{ url: string; apiKey: string }>
+  createSpace(name: string, apiKey?: string): Promise<{ name: string; url: string; apiKey: string }>
   listSpaces(): Promise<SpaceInfo[]>
-  deleteSpace(nameOrId: string): Promise<void>
+  deleteSpace(name: string): Promise<void>
+}
+
+// ── Session ↔ Space Mapping (many-to-many) ──────────────────────────
+
+export interface SpaceMapping {
+  sessionId: string
+  spaceName: string
+  spaceUrl: string
+  spaceApiKey: string
 }
 
 // ── Session Types ───────────────────────────────────────────────────
@@ -72,8 +106,6 @@ export interface SpaceManager {
 export interface InternalSessionInfo {
   id: string
   title: string
-  spaceUrl: string
-  // apiKey stored only in DO metadata, never leaked to responses
   modelId: string
   providerId: string
   createdAt: number
@@ -103,12 +135,74 @@ export interface ToolResultInfo {
   isError?: boolean
 }
 
+// ── Stored Message Types (shared between DO and agent-loop) ─────────
+
+export type StoredPart = {
+  id: string
+  sessionID: string
+  messageID: string
+  type: string
+  text?: string
+  time?: { start: number; end?: number }
+  reason?: string
+  cost?: number
+  tokens?: {
+    input: number
+    output: number
+    reasoning: number
+    cache: { read: number; write: number }
+  }
+  callID?: string
+  tool?: string
+  state?: {
+    status: string
+    input: Record<string, unknown>
+    raw?: string
+    title?: string
+    output?: string
+    metadata?: Record<string, unknown>
+    time?: { start: number; end?: number }
+    error?: string
+  }
+  metadata?: Record<string, unknown>
+  snapshot?: string
+}
+
+export interface StoredMessage {
+  info: {
+    id: string
+    sessionID: string
+    role: "user" | "assistant"
+    time: { created: number; completed?: number }
+    agent: string
+    model?: { providerID: string; modelID: string }
+    parentID?: string
+    modelID?: string
+    providerID?: string
+    mode?: string
+    path?: { cwd: string; root: string }
+    cost?: number
+    tokens?: {
+      input: number
+      output: number
+      reasoning: number
+      cache: { read: number; write: number }
+    }
+    finish?: string
+    summary?: { diffs: unknown[] }
+    error?: unknown
+  }
+  parts: StoredPart[]
+}
+
 // ── Event Types ─────────────────────────────────────────────────────
 
 export type SessionEvent =
   | { type: "session.created"; session: InternalSessionInfo }
   | { type: "session.updated"; session: Partial<InternalSessionInfo> & { id: string } }
   | { type: "message.created"; message: SessionMessage }
+  | { type: "text.start"; sessionId: string; messageId: string }
+  | { type: "text.end"; sessionId: string; messageId: string }
   | { type: "message.delta"; sessionId: string; messageId: string; delta: string }
   | { type: "message.completed"; sessionId: string; messageId: string }
   | { type: "tool.called"; sessionId: string; messageId: string; tool: ToolCallInfo }

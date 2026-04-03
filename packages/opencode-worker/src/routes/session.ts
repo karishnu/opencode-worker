@@ -29,14 +29,6 @@ export function sessionRoutes(): Hono<{ Bindings: Env }> {
     const stub = getMainDO(c.env)
     const session = await stub.createSession(undefined, body.title as string | undefined)
 
-    // Store Agent Space config as session meta if available
-    if (c.env.AGENT_SPACE_URL) {
-      await stub.setSessionMeta(session.id, "spaceUrl", c.env.AGENT_SPACE_URL)
-    }
-    if (c.env.AGENT_SPACE_API_KEY) {
-      await stub.setSessionMeta(session.id, "spaceApiKey", c.env.AGENT_SPACE_API_KEY)
-    }
-
     // Broadcast session created
     await stub.broadcast({
       type: "session.updated",
