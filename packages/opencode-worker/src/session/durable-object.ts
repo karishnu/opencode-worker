@@ -1,9 +1,8 @@
 import { DurableObject } from "cloudflare:workers"
 import type { Env } from "../env"
-import type { SessionEvent, SpaceMapping, StoredMessage, StoredPart } from "../types"
+import type { SessionEvent, StoredMessage, StoredPart } from "../types"
+import type { SpaceMapping } from "../tools"
 import { getLanguageModel } from "../provider/registry"
-import { AgentSpaceWorkspaceAdapter } from "../adapters/workspace-agent-space"
-import { OrchestratorMcpClient } from "../adapters/orchestrator-mcp-client"
 import { createTools } from "../tools"
 import { runAgentLoop } from "./agent-loop"
 
@@ -99,12 +98,12 @@ export class SessionDO extends DurableObject<Env> {
         PRIMARY KEY (session_id, key)
       )
     `)
+    // Migrate old session_spaces schema (had space_url, space_api_key columns)
+    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS session_spaces`)
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS session_spaces (
         session_id TEXT NOT NULL,
         space_name TEXT NOT NULL,
-        space_url TEXT NOT NULL,
-        space_api_key TEXT NOT NULL,
         PRIMARY KEY (session_id, space_name)
       )
     `)
@@ -276,13 +275,11 @@ export class SessionDO extends DurableObject<Env> {
 
   // ── Session ↔ Space Mappings ────────────────────────────────────
 
-  addSessionSpace(sessionId: string, spaceName: string, spaceUrl: string, spaceApiKey: string): void {
+  addSessionSpace(sessionId: string, spaceName: string): void {
     this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO session_spaces (session_id, space_name, space_url, space_api_key) VALUES (?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO session_spaces (session_id, space_name) VALUES (?, ?)`,
       sessionId,
       spaceName,
-      spaceUrl,
-      spaceApiKey,
     )
   }
 
@@ -294,37 +291,28 @@ export class SessionDO extends DurableObject<Env> {
     )
   }
 
+  hasSessionSpace(sessionId: string, spaceName: string): boolean {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT 1 FROM session_spaces WHERE session_id = ? AND space_name = ?`,
+        sessionId,
+        spaceName,
+      )
+      .toArray()
+    return rows.length > 0
+  }
+
   getSessionSpaces(sessionId: string): SpaceMapping[] {
     const rows = this.ctx.storage.sql
       .exec(
-        `SELECT session_id, space_name, space_url, space_api_key FROM session_spaces WHERE session_id = ?`,
+        `SELECT session_id, space_name FROM session_spaces WHERE session_id = ?`,
         sessionId,
       )
       .toArray()
     return rows.map((r) => ({
       sessionId: r.session_id as string,
       spaceName: r.space_name as string,
-      spaceUrl: r.space_url as string,
-      spaceApiKey: r.space_api_key as string,
     }))
-  }
-
-  getSpaceForSession(sessionId: string, spaceName: string): SpaceMapping | null {
-    const rows = this.ctx.storage.sql
-      .exec(
-        `SELECT session_id, space_name, space_url, space_api_key FROM session_spaces WHERE session_id = ? AND space_name = ?`,
-        sessionId,
-        spaceName,
-      )
-      .toArray()
-    if (rows.length === 0) return null
-    const r = rows[0]
-    return {
-      sessionId: r.session_id as string,
-      spaceName: r.space_name as string,
-      spaceUrl: r.space_url as string,
-      spaceApiKey: r.space_api_key as string,
-    }
   }
 
   // ── Get Messages (V2 format for TUI) ──────────────────────────
@@ -519,24 +507,13 @@ export class SessionDO extends DurableObject<Env> {
       const getMessages = () => this.getMessagesForSession(sessionId)
 
       const model = getLanguageModel(providerId, modelId, this.env)
-      const orchestrator = new OrchestratorMcpClient(
-        this.env.ORCHESTRATOR_URL,
-        this.env.ORCHESTRATOR_API_KEY,
-      )
-      const resolveWorkspace = (spaceName: string) => {
-        const mapping = this.getSpaceForSession(sessionId, spaceName)
-        if (!mapping) {
-          throw new Error(`Space "${spaceName}" is not attached to this session. Use attach_space or create_space first.`)
-        }
-        return new AgentSpaceWorkspaceAdapter(mapping.spaceUrl, mapping.spaceApiKey)
-      }
       const spaceStore = {
-        add: (name: string, url: string, apiKey: string) => this.addSessionSpace(sessionId, name, url, apiKey),
+        add: (name: string) => this.addSessionSpace(sessionId, name),
         remove: (name: string) => this.removeSessionSpace(sessionId, name),
         list: () => this.getSessionSpaces(sessionId),
-        get: (name: string) => this.getSpaceForSession(sessionId, name),
+        has: (name: string) => this.hasSessionSpace(sessionId, name),
       }
-      const tools = createTools({ resolveWorkspace, orchestrator, sessionId, spaceStore })
+      const tools = createTools({ env: this.env, sessionId, spaceStore })
 
       await runAgentLoop({
         model,

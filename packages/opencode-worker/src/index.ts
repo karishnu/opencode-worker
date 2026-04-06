@@ -10,8 +10,10 @@ import { projectRoutes } from "./routes/project"
 import { stubRoutes } from "./routes/stubs"
 import { spaceRoutes } from "./routes/space"
 import type { SessionDO as _SessionDO } from "./session/durable-object"
+import type { SpaceDO as _SpaceDO } from "./space/durable-object"
 
 export { SessionDO } from "./session/durable-object"
+export { SpaceDO } from "./space/durable-object"
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -74,6 +76,28 @@ app.get("/event", async (c) => {
 
 app.route("/", stubRoutes())        // mounts /agent, /skill, /path, /vcs, etc.
 app.route("/space", spaceRoutes())  // non-upstream: Agent Space management
+
+// Git Smart HTTP: forward to SpaceDO
+app.all("/space/:name/repo.git/*", async (c) => {
+  const spaceName = c.req.param("name")
+  const id = c.env.SPACE_DO.idFromName(spaceName)
+  const stub = c.env.SPACE_DO.get(id) as DurableObjectStub<_SpaceDO>
+  return stub.fetch(c.req.raw)
+})
+
+// Deployment preview: forward to SpaceDO → Dynamic Worker
+app.all("/space/:name/preview/:branch/*", async (c) => {
+  const spaceName = c.req.param("name")
+  const id = c.env.SPACE_DO.idFromName(spaceName)
+  const stub = c.env.SPACE_DO.get(id) as DurableObjectStub<_SpaceDO>
+  return stub.fetch(c.req.raw)
+})
+app.all("/space/:name/preview/:branch", async (c) => {
+  const spaceName = c.req.param("name")
+  const id = c.env.SPACE_DO.idFromName(spaceName)
+  const stub = c.env.SPACE_DO.get(id) as DurableObjectStub<_SpaceDO>
+  return stub.fetch(c.req.raw)
+})
 
 // ── Catch-all ─────────────────────────────────────────────────────
 

@@ -7,10 +7,10 @@
 export interface Env {
   // Durable Object bindings
   SESSION_DO: DurableObjectNamespace
+  SPACE_DO: DurableObjectNamespace
 
-  // Orchestrator (Agent Space management) configuration
-  ORCHESTRATOR_URL: string
-  ORCHESTRATOR_API_KEY: string
+  // Worker loader for deploy engine (Dynamic Workers)
+  LOADER: WorkerLoader
 
   // LLM provider API keys
   ANTHROPIC_API_KEY?: string

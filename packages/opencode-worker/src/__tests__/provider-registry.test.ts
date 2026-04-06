@@ -5,8 +5,8 @@ import type { Env } from "../env"
 function makeEnv(overrides: Partial<Env> = {}): Env {
   return {
     SESSION_DO: {} as any,
-    ORCHESTRATOR_URL: "https://orchestrator.example.com",
-    ORCHESTRATOR_API_KEY: "key",
+    SPACE_DO: {} as any,
+    LOADER: {} as any,
     ...overrides,
   }
 }

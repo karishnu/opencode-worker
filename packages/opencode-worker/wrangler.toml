@@ -8,10 +8,36 @@ compatibility_flags = ["nodejs_compat"]
 name = "SESSION_DO"
 class_name = "SessionDO"
 
+[[durable_objects.bindings]]
+name = "SPACE_DO"
+class_name = "SpaceDO"
+
+# Worker loader for deploy engine (Dynamic Workers)
+[[worker_loaders]]
+binding = "LOADER"
+
 # DO migrations
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SpaceDO"]
+
+# Observability: logs, traces, invocation logs
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+  [observability.logs]
+  enabled = true
+  invocation_logs = true
+  head_sampling_rate = 1
+
+  [observability.traces]
+  enabled = true
+  head_sampling_rate = 1
 
 # Environment variables (non-secret defaults)
 [vars]
@@ -22,8 +48,6 @@ ENVIRONMENT = "development"
 # ANTHROPIC_API_KEY     - Anthropic API key
 # OPENAI_API_KEY        - OpenAI API key
 # GOOGLE_API_KEY        - Google AI API key
-# ORCHESTRATOR_URL      - Orchestrator (Agent Space management) instance URL
-# ORCHESTRATOR_API_KEY  - Orchestrator API key (Bearer token for MCP)
 #
 # Cloudflare AI Gateway (provider: "cloudflare-ai-gateway")
 # Matches upstream opencode env var names:

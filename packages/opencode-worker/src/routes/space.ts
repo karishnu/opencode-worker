@@ -1,49 +1,43 @@
 import { Hono } from "hono"
 import { z } from "zod"
 import type { Env } from "../env"
-import { OrchestratorMcpClient } from "../adapters/orchestrator-mcp-client"
+import type { SpaceDO } from "../space/durable-object"
 
 type SpaceApp = Hono<{ Bindings: Env }>
 
 /**
  * Space management routes.
  *
- * Delegates to the orchestrator MCP for
- * creating, listing, and deleting spaces.
+ * Spaces are named SpaceDO instances — they auto-initialize on first use.
+ * These routes provide a REST API for managing spaces outside the agent loop.
  */
 export function spaceRoutes(): SpaceApp {
   const app = new Hono<{ Bindings: Env }>()
 
-  function getOrchestrator(env: Env): OrchestratorMcpClient {
-    return new OrchestratorMcpClient(env.ORCHESTRATOR_URL, env.ORCHESTRATOR_API_KEY)
+  function resolveSpace(env: Env, name: string): DurableObjectStub<SpaceDO> {
+    const id = env.SPACE_DO.idFromName(name)
+    return env.SPACE_DO.get(id) as DurableObjectStub<SpaceDO>
   }
 
-  // ── Create space ──────────────────────────────────────────────
+  // ── Get space info ────────────────────────────────────────────
+  app.get("/:name", async (c) => {
+    const name = c.req.param("name")
+    const space = resolveSpace(c.env, name)
+    const info = await space.getInfo()
+    return c.json({ name, ...info })
+  })
+
+  // ── Initialize a space (trigger creation) ─────────────────────
   app.post("/", async (c) => {
     const body = await c.req.json().catch(() => ({}))
-    const parsed = z.object({ name: z.string() }).safeParse(body)
+    const parsed = z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/) }).safeParse(body)
     if (!parsed.success) {
       return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400)
     }
 
-    const orchestrator = getOrchestrator(c.env)
-    const result = await orchestrator.createSpace(parsed.data.name)
-    return c.json(result, 201)
-  })
-
-  // ── List spaces ───────────────────────────────────────────────
-  app.get("/", async (c) => {
-    const orchestrator = getOrchestrator(c.env)
-    const spaces = await orchestrator.listSpaces()
-    return c.json(spaces)
-  })
-
-  // ── Delete space ──────────────────────────────────────────────
-  app.delete("/:nameOrId", async (c) => {
-    const nameOrId = c.req.param("nameOrId")
-    const orchestrator = getOrchestrator(c.env)
-    await orchestrator.deleteSpace(nameOrId)
-    return c.json({ ok: true })
+    const space = resolveSpace(c.env, parsed.data.name)
+    const info = await space.getInfo()
+    return c.json({ name: parsed.data.name, ...info }, 201)
   })
 
   return app

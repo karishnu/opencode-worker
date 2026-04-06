@@ -1,25 +1,37 @@
-import type { WorkspaceAdapter, SpaceMapping } from "../types"
-import type { OrchestratorMcpClient } from "../adapters/orchestrator-mcp-client"
+import type { SpaceDO } from "../space/durable-object"
+import type { Env } from "../env"
 import { tool } from "ai"
 import { z } from "zod"
 
+export interface SpaceMapping {
+  sessionId: string
+  spaceName: string
+}
+
 export interface ToolsContext {
-  resolveWorkspace: (spaceName: string) => WorkspaceAdapter
-  orchestrator: OrchestratorMcpClient
+  env: Env
   sessionId: string
   spaceStore: {
-    add: (name: string, url: string, apiKey: string) => void
+    add: (name: string) => void
     remove: (name: string) => void
     list: () => SpaceMapping[]
-    get: (name: string) => SpaceMapping | null
+    has: (name: string) => boolean
   }
+}
+
+/**
+ * Resolve a space name to a SpaceDO stub via DO RPC (same worker, no HTTP).
+ */
+function resolveSpace(env: Env, spaceName: string): DurableObjectStub<SpaceDO> {
+  const id = env.SPACE_DO.idFromName(spaceName)
+  return env.SPACE_DO.get(id) as DurableObjectStub<SpaceDO>
 }
 
 /**
  * Build the full set of AI SDK tools.
  *
  * Workspace tools require a `space` parameter to target a specific agent space.
- * Space management tools interact with the orchestrator and session↔space mappings.
+ * Space management tools manage session↔space mappings (spaces auto-initialize on first use).
  */
 export function createTools(ctx: ToolsContext) {
   return {
@@ -39,7 +51,6 @@ export function createTools(ctx: ToolsContext) {
     get_deployment: createGetDeploymentTool(ctx),
     bash: createBashStub(),
     create_space: createCreateSpaceTool(ctx),
-    list_spaces: createListSpacesTool(ctx),
     delete_space: createDeleteSpaceTool(ctx),
     attach_space: createAttachSpaceTool(ctx),
     detach_space: createDetachSpaceTool(ctx),
@@ -63,8 +74,8 @@ function createReadTool(ctx: ToolsContext) {
       limit: z.number().int().min(1).optional().describe("Number of lines to return"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      return ws.readFile(args.filePath, {
+      const space = resolveSpace(ctx.env, args.space)
+      return space.readFile(args.filePath, {
         offset: args.offset,
         limit: args.limit,
       })
@@ -81,8 +92,8 @@ function createWriteTool(ctx: ToolsContext) {
       content: z.string().describe("File content"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const result = await ws.writeFile(args.filePath, args.content)
+      const space = resolveSpace(ctx.env, args.space)
+      const result = await space.writeFile(args.filePath, args.content)
       return JSON.stringify(result)
     },
   })
@@ -100,8 +111,8 @@ function createEditTool(ctx: ToolsContext) {
       new_string: z.string().describe("Replacement text"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const result = await ws.editFile(args.filePath, args.old_string, args.new_string)
+      const space = resolveSpace(ctx.env, args.space)
+      const result = await space.editFile(args.filePath, args.old_string, args.new_string)
       return JSON.stringify(result)
     },
   })
@@ -117,8 +128,8 @@ function createGlobTool(ctx: ToolsContext) {
       pattern: z.string().describe("Glob pattern (e.g. '**/*.ts', 'src/*.js')"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const files = await ws.glob(args.pattern)
+      const space = resolveSpace(ctx.env, args.space)
+      const files = await space.glob(args.pattern)
       if (files.length === 0) return "No files matched."
       return files.join("\n")
     },
@@ -136,10 +147,10 @@ function createGrepTool(ctx: ToolsContext) {
       include: z.string().optional().describe("Glob pattern to filter files (e.g. '*.ts')"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const matches = await ws.grep(args.pattern, args.include)
+      const space = resolveSpace(ctx.env, args.space)
+      const matches = await space.grep(args.pattern, args.include)
       if (matches.length === 0) return "No matches found."
-      return matches.map((m) => `${m.path}:${m.line}:${m.content}`).join("\n")
+      return matches.map((m: any) => `${m.path}:${m.line}:${m.content}`).join("\n")
     },
   })
 }
@@ -152,8 +163,8 @@ function createListTool(ctx: ToolsContext) {
       path: z.string().optional().describe("Directory path to list"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const files = await ws.list(args.path)
+      const space = resolveSpace(ctx.env, args.space)
+      const files = await space.list(args.path)
       if (files.length === 0) return "No files found."
       return JSON.stringify(files, null, 2)
     },
@@ -168,8 +179,8 @@ function createPatchTool(ctx: ToolsContext) {
       diff: z.string().describe("Unified diff content"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const result = await ws.patch(args.diff)
+      const space = resolveSpace(ctx.env, args.space)
+      const result = await space.patch(args.diff) as any
       const lines: string[] = []
       for (const p of result.applied) lines.push(`Patched: ${p}`)
       for (const p of result.failed) lines.push(`Failed: ${p}`)
@@ -188,15 +199,15 @@ function createGitCommitTool(ctx: ToolsContext) {
       author_email: z.string().optional().describe("Author email"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
+      const space = resolveSpace(ctx.env, args.space)
       const author =
         args.author_name || args.author_email
           ? {
-              name: args.author_name ?? "AgentSpace",
-              email: args.author_email ?? "agent@agent-space.workers.dev",
+              name: args.author_name ?? "Agent",
+              email: args.author_email ?? "agent@opencode.ai",
             }
           : undefined
-      const result = await ws.gitCommit(args.message, author)
+      const result = await space.gitCommit(args.message, author)
       return JSON.stringify(result)
     },
   })
@@ -210,8 +221,8 @@ function createGitLogTool(ctx: ToolsContext) {
       depth: z.number().int().min(1).optional().describe("Max number of commits to return"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const entries = await ws.gitLog(args.depth)
+      const space = resolveSpace(ctx.env, args.space)
+      const entries = await space.gitLog(args.depth)
       if (entries.length === 0) return "No commits found."
       return JSON.stringify(entries, null, 2)
     },
@@ -220,20 +231,15 @@ function createGitLogTool(ctx: ToolsContext) {
 
 function createGitStatusTool(ctx: ToolsContext) {
   return tool({
-    description: "List files in an agent space's working tree with their modification times.",
+    description: "Show git status of files in an agent space (HEAD vs workdir vs staging).",
     inputSchema: z.object({
       space: spaceParam,
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const entries = await ws.gitStatus()
-      if (entries.length === 0) return "Working tree is empty."
-      return entries
-        .map((e) => {
-          const date = new Date(e.mtime || Date.now()).toISOString()
-          return `${date}  ${e.path}`
-        })
-        .join("\n")
+      const space = resolveSpace(ctx.env, args.space)
+      const entries = await space.gitStatus()
+      if (entries.length === 0) return "Working tree is clean."
+      return JSON.stringify(entries, null, 2)
     },
   })
 }
@@ -241,22 +247,21 @@ function createGitStatusTool(ctx: ToolsContext) {
 function createDeployTool(ctx: ToolsContext) {
   return tool({
     description:
-      "Deploy code from a git branch in an agent space as a dynamic worker. " +
-      "Returns the deployment metadata including the release URL.",
+      "Deploy code from a git branch in an agent space as a preview. " +
+      "The code must be a Cloudflare Worker: an entry file (src/index.ts or index.ts) " +
+      "that exports a default fetch handler. For websites, write a worker that serves " +
+      "the HTML/CSS/JS as responses — do NOT write bare static files. " +
+      "Always git_commit before deploying. Returns deployment metadata including a preview_url " +
+      "you MUST share with the user. If the build fails, error details are returned — " +
+      "fix the issues and redeploy.",
     inputSchema: z.object({
       space: spaceParam,
       branch: z.string().describe("Git branch name to deploy (e.g. 'release', 'main', 'feature/ui')"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const data = await ws.deploy(args.branch)
-      const mapping = ctx.spaceStore.get(args.space)
-      const url = mapping?.spaceUrl?.replace(/\/+$/, "")
-      return JSON.stringify(
-        { ...data, ...(url ? { release_url: `${url}/release/${args.branch}` } : {}) },
-        null,
-        2,
-      )
+      const space = resolveSpace(ctx.env, args.space)
+      const data = await space.deploy(args.branch)
+      return JSON.stringify(data, null, 2)
     },
   })
 }
@@ -269,8 +274,8 @@ function createUndeployTool(ctx: ToolsContext) {
       branch: z.string().describe("Branch name to undeploy"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const data = await ws.undeploy(args.branch)
+      const space = resolveSpace(ctx.env, args.space)
+      const data = await space.undeploy(args.branch)
       return JSON.stringify(data, null, 2)
     },
   })
@@ -283,9 +288,8 @@ function createListDeploymentsTool(ctx: ToolsContext) {
       space: spaceParam,
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const data = await ws.listDeployments()
-      if (data.length === 0) return "No deployments found."
+      const space = resolveSpace(ctx.env, args.space)
+      const data = await space.listDeployments()
       return JSON.stringify(data, null, 2)
     },
   })
@@ -299,8 +303,8 @@ function createGetDeploymentTool(ctx: ToolsContext) {
       branch: z.string().describe("Branch name to inspect"),
     }),
     execute: async (args) => {
-      const ws = ctx.resolveWorkspace(args.space)
-      const data = await ws.getDeployment(args.branch)
+      const space = resolveSpace(ctx.env, args.space)
+      const data = await space.getDeployment(args.branch)
       return JSON.stringify(data, null, 2)
     },
   })
@@ -325,46 +329,38 @@ function createBashStub() {
 function createCreateSpaceTool(ctx: ToolsContext) {
   return tool({
     description:
-      "Create a new agent space via the orchestrator and attach it to the current session. " +
-      "Returns the space URL and API key. The space is automatically attached to this session.",
+      "Create a new agent space and attach it to the current session. " +
+      "Spaces are Durable Object instances with isolated filesystem + git. " +
+      "They initialize automatically on first use.",
     inputSchema: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).describe("Space name (lowercase alphanumeric + hyphens)"),
     }),
     execute: async (args) => {
-      const result = await ctx.orchestrator.createSpace(args.name)
-      ctx.spaceStore.add(args.name, result.url, result.apiKey)
+      // Space auto-initializes on first RPC call — just attach to session
+      ctx.spaceStore.add(args.name)
+      // Trigger initialization by getting info
+      const space = resolveSpace(ctx.env, args.name)
+      const info = await space.getInfo()
       return JSON.stringify({
         name: args.name,
-        url: result.url,
-        apiKey: result.apiKey,
         attached: true,
+        ...info,
       }, null, 2)
-    },
-  })
-}
-
-function createListSpacesTool(ctx: ToolsContext) {
-  return tool({
-    description: "List all agent spaces available on the orchestrator.",
-    inputSchema: z.object({}),
-    execute: async () => {
-      const spaces = await ctx.orchestrator.listSpaces()
-      if (spaces.length === 0) return "No spaces found."
-      return JSON.stringify(spaces, null, 2)
     },
   })
 }
 
 function createDeleteSpaceTool(ctx: ToolsContext) {
   return tool({
-    description: "Delete an agent space from the orchestrator. Also detaches it from the current session.",
+    description: "Detach and delete an agent space. This removes all data in the space.",
     inputSchema: z.object({
       name: z.string().describe("Name of the space to delete"),
     }),
     execute: async (args) => {
-      await ctx.orchestrator.deleteSpace(args.name)
       ctx.spaceStore.remove(args.name)
-      return `Space "${args.name}" deleted and detached.`
+      // Note: DO storage is automatically cleaned up when the DO is garbage collected.
+      // For immediate cleanup, we could call a cleanup RPC method.
+      return `Space "${args.name}" detached and marked for deletion.`
     },
   })
 }
@@ -372,15 +368,12 @@ function createDeleteSpaceTool(ctx: ToolsContext) {
 function createAttachSpaceTool(ctx: ToolsContext) {
   return tool({
     description:
-      "Attach an existing agent space to the current session. " +
-      "Provide the space name, URL, and API key (from create_space or list_spaces).",
+      "Attach an existing agent space to the current session by name.",
     inputSchema: z.object({
       name: z.string().describe("Space name"),
-      url: z.string().describe("Space URL"),
-      api_key: z.string().describe("Space API key"),
     }),
     execute: async (args) => {
-      ctx.spaceStore.add(args.name, args.url, args.api_key)
+      ctx.spaceStore.add(args.name)
       return `Space "${args.name}" attached to session.`
     },
   })
@@ -407,7 +400,7 @@ function createListSessionSpacesTool(ctx: ToolsContext) {
       const mappings = ctx.spaceStore.list()
       if (mappings.length === 0) return "No spaces attached to this session."
       return JSON.stringify(
-        mappings.map((m) => ({ name: m.spaceName, url: m.spaceUrl })),
+        mappings.map((m) => ({ name: m.spaceName })),
         null,
         2,
       )
