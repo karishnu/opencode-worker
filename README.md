@@ -1,16 +1,36 @@
 # OpenCode Worker
 
-A Cloudflare Workers-native port of [OpenCode](https://github.com/anomalyco/opencode) that runs **entirely on Cloudflare's edge** — no servers, no containers, no VMs. Sessions, filesystems, git repos, LLM orchestration, and live deployment previews all live inside Durable Objects on the same Worker.
+A Cloudflare Workers-native port of the [OpenCode **server**](https://github.com/anomalyco/opencode) that runs **entirely on Cloudflare's edge** — no servers, no containers, no VMs. Sessions, filesystems, git repos, LLM orchestration, and live deployment previews all live inside Durable Objects on the same Worker.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/karishnu/opencode-do-v2)
+The stock [OpenCode TUI](https://github.com/anomalyco/opencode) and web client connect to this worker **unmodified** — all route paths and SSE event shapes match upstream exactly.
+
+---
+
+## Usage
+
+### 1. Deploy
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/karishnu/opencode-worker)
+
+### 2. Connect
+
+```bash
+opencode attach https://your-worker.workers.dev
+```
+
+If you set a `SERVER_PASSWORD` secret, include credentials:
+
+```bash
+opencode attach https://opencode:yourpassword@your-worker.workers.dev
+```
 
 ---
 
 ## Why
 
-OpenCode is a powerful AI coding assistant, but its upstream server assumes a local machine with Bun, a real filesystem, and shell access. **opencode-worker** replaces all of that with Cloudflare primitives:
+The upstream OpenCode server assumes a local machine with Bun, a real filesystem, and shell access. **opencode-worker** replaces all of that with Cloudflare primitives:
 
-| Upstream (Bun/Node) | This Worker |
+| Upstream Server (Bun/Node) | This Worker |
 |---|---|
 | Local filesystem | `@cloudflare/shell` Workspace (SQLite-backed, in Durable Object) |
 | Git CLI | `isomorphic-git` via `@cloudflare/shell/git` |
@@ -18,31 +38,29 @@ OpenCode is a powerful AI coding assistant, but its upstream server assumes a lo
 | Single-user process | Multi-session, multi-space, SSE fanout to many clients |
 | Deploy via CLI | `@cloudflare/worker-bundler` → Dynamic Workers (live preview URLs) |
 
-The stock [OpenCode TUI](https://github.com/anomalyco/opencode) and web client connect to this worker **unmodified** — all route paths and SSE event shapes match upstream exactly.
-
 ---
 
 ## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                    Cloudflare Worker (Hono)                       │
+│                    Cloudflare Worker (Hono)                      │
 │                                                                  │
 │  ┌─ Middleware ──────────────────────────────────────────────┐   │
 │  │  CORS → Basic Auth → Request Logging                      │   │
 │  └───────────────────────────────────────────────────────────┘   │
 │                                                                  │
-│  ┌─ Routes ─────────────────────────────────────────────────┐   │
+│  ┌─ Routes ────────────────────────────────────────────────-─┐   │
 │  │  /session/*    → Session CRUD, messages, prompts          │   │
 │  │  /event        → SSE stream (→ SessionDO)                 │   │
 │  │  /provider/*   → LLM provider listing                     │   │
 │  │  /space/*      → Space management REST API                │   │
 │  │  /space/:n/repo.git/* → Git Smart HTTP (→ SpaceDO)        │   │
-│  │  /space/:n/preview/:b/* → Dynamic Worker preview (→ SpaceDO) │
-│  │  /global, /project, /config, /agent, /vcs, ...  → Stubs  │   │
+│  │  /space/:n/preview/:b/* → Dynamic Worker preview (→ SpaceDO)  │
+│  │  /global, /project, /config, /agent, /vcs, ...  → Stubs   │   │
 │  └───────────────────────────────────────────────────────────┘   │
 │                                                                  │
-│  ┌─ Durable Objects ────────────────────────────────────────┐   │
+│  ┌─ Durable Objects ───────────────────────────────────────-─┐   │
 │  │                                                           │   │
 │  │  SessionDO (single "main" instance)                       │   │
 │  │  ├── SQLite: sessions, messages, session_meta,            │   │
@@ -110,13 +128,15 @@ Supports three providers with two modes:
 
 ---
 
-## Quick Start
+## Manual Setup
+
+If you prefer to deploy manually instead of the one-click button:
 
 ### 1. Clone & Install
 
 ```bash
-git clone --recurse-submodules https://github.com/karishnu/opencode-do-v2.git
-cd opencode-do-v2
+git clone --recurse-submodules https://github.com/karishnu/opencode-worker.git
+cd opencode-worker
 npm install
 ```
 
@@ -145,20 +165,6 @@ npx wrangler secret put CLOUDFLARE_API_TOKEN
 
 ```bash
 npm run deploy
-```
-
-Or use the one-click deploy button at the top of this README.
-
-### 4. Connect a Client
-
-Point the OpenCode TUI or web client at your worker URL:
-
-```bash
-# OpenCode TUI
-OPENCODE_SERVER=https://your-worker.workers.dev opencode
-
-# With auth
-OPENCODE_SERVER=https://opencode:yourpassword@your-worker.workers.dev opencode
 ```
 
 ---
@@ -229,6 +235,12 @@ The LLM agent has access to the following tools. All workspace tools require a `
 | `detach_space` | Detach a space from session (doesn't delete) |
 | `list_session_spaces` | List all spaces attached to current session |
 
+### HTTP Tools
+
+| Tool | Description |
+|------|-------------|
+| `curl` | Make HTTP requests (GET, POST, etc.) to APIs or preview URLs |
+
 ### Stubs
 
 | Tool | Description |
@@ -240,7 +252,7 @@ The LLM agent has access to the following tools. All workspace tools require a `
 ## Project Structure
 
 ```
-opencode-do-v2/
+opencode-worker/
 ├── packages/
 │   └── opencode-worker/
 │       ├── src/
