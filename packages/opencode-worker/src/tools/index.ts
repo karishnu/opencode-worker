@@ -11,6 +11,7 @@ export interface SpaceMapping {
 export interface ToolsContext {
   env: Env
   sessionId: string
+  host: string
   spaceStore: {
     add: (name: string) => void
     remove: (name: string) => void
@@ -50,6 +51,7 @@ export function createTools(ctx: ToolsContext) {
     list_deployments: createListDeploymentsTool(ctx),
     get_deployment: createGetDeploymentTool(ctx),
     bash: createBashStub(),
+    curl: createCurlTool(),
     create_space: createCreateSpaceTool(ctx),
     delete_space: createDeleteSpaceTool(ctx),
     attach_space: createAttachSpaceTool(ctx),
@@ -253,14 +255,23 @@ function createDeployTool(ctx: ToolsContext) {
       "the HTML/CSS/JS as responses — do NOT write bare static files. " +
       "Always git_commit before deploying. Returns deployment metadata including a preview_url " +
       "you MUST share with the user. If the build fails, error details are returned — " +
-      "fix the issues and redeploy.",
+      "fix the issues and redeploy.\n\n" +
+      "BUNDLING: The deploy pipeline uses @cloudflare/worker-bundler which runs esbuild " +
+      "under the hood. It auto-detects the entry point (src/index.ts, index.ts, src/index.js, etc.), " +
+      "resolves imports, and bundles everything into a single Worker module. " +
+      "npm packages are resolved from the file tree, so you MUST write a package.json with " +
+      "the dependencies you need (e.g. hono, itty-router) before committing and deploying. " +
+      "The bundler handles TypeScript natively — no tsconfig.json or build step required.",
     inputSchema: z.object({
       space: spaceParam,
       branch: z.string().describe("Git branch name to deploy (e.g. 'release', 'main', 'feature/ui')"),
     }),
     execute: async (args) => {
       const space = resolveSpace(ctx.env, args.space)
-      const data = await space.deploy(args.branch)
+      const data = await space.deploy(args.branch) as Record<string, unknown>
+      if (data.preview_url && ctx.host) {
+        data.preview_url = `${ctx.host}${data.preview_url}`
+      }
       return JSON.stringify(data, null, 2)
     },
   })
@@ -320,6 +331,37 @@ function createBashStub() {
     }),
     execute: async () => {
       return "Error: Shell execution is not available in the Cloudflare Workers environment. Use the workspace tools (read, write, edit, grep, glob, git_commit, etc.) instead."
+    },
+  })
+}
+
+function createCurlTool() {
+  return tool({
+    description:
+      "Make an HTTP request (like curl). Use this to call APIs, check " +
+      "deployed preview URLs, or fetch remote resources.",
+    inputSchema: z.object({
+      url: z.string().describe("URL to request"),
+      method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]).default("GET").describe("HTTP method"),
+      headers: z.record(z.string()).optional().describe("Request headers"),
+      body: z.string().optional().describe("Request body (for POST/PUT/PATCH)"),
+    }),
+    execute: async (args) => {
+      const res = await fetch(args.url, {
+        method: args.method,
+        headers: args.headers,
+        body: args.body,
+      })
+      const resHeaders: Record<string, string> = {}
+      res.headers.forEach((v, k) => { resHeaders[k] = v })
+      const text = await res.text()
+      const maxLen = 100_000
+      return JSON.stringify({
+        status: res.status,
+        statusText: res.statusText,
+        headers: resHeaders,
+        body: text.length > maxLen ? text.slice(0, maxLen) + "\n[truncated]" : text,
+      }, null, 2)
     },
   })
 }

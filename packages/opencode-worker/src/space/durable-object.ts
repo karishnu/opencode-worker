@@ -295,7 +295,7 @@ export class SpaceDO extends DurableObject<Env> {
 
     const r = row[0]
     const mainModule = r.main_module as string
-    const modules = JSON.parse(r.modules as string) as Record<string, string>
+    const modules = JSON.parse(r.modules as string) as Record<string, string | Record<string, unknown>>
     const commitHash = r.commit_hash as string
     const spaceName = this.ctx.id.name ?? "space"
     const workerId = `${spaceName}-${branch}-${commitHash}`

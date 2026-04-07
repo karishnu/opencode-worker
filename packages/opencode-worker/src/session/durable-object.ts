@@ -513,7 +513,8 @@ export class SessionDO extends DurableObject<Env> {
         list: () => this.getSessionSpaces(sessionId),
         has: (name: string) => this.hasSessionSpace(sessionId, name),
       }
-      const tools = createTools({ env: this.env, sessionId, spaceStore })
+      const host = new URL(request.url).origin
+      const tools = createTools({ env: this.env, sessionId, host, spaceStore })
 
       await runAgentLoop({
         model,

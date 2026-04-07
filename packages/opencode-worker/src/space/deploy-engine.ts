@@ -87,14 +87,21 @@ async function deployBranch(
   }
 
   let mainModule: string
-  let serializedModules: Record<string, string | { js: string }>
+  let serializedModules: Record<string, string | Record<string, unknown>>
 
   try {
     const result = await createWorker({ files })
     mainModule = result.mainModule
     serializedModules = {}
     for (const [name, value] of Object.entries(result.modules)) {
-      serializedModules[name] = typeof value === "string" ? value : (value as { js: string })
+      serializedModules[name] = typeof value === "string" ? value : (value as Record<string, unknown>)
+    }
+
+    // Inject __STATIC_CONTENT_MANIFEST if the bundler left it as an external import.
+    // Many frameworks (Hono, Workers Sites) import this Wrangler-injected module;
+    // Dynamic Workers don't provide it automatically, so we supply an empty manifest.
+    if (!serializedModules["__STATIC_CONTENT_MANIFEST"]) {
+      serializedModules["__STATIC_CONTENT_MANIFEST"] = { text: "{}" }
     }
   } catch (e: any) {
     return jsonResponse({
