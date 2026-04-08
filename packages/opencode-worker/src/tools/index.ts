@@ -250,18 +250,28 @@ function createDeployTool(ctx: ToolsContext) {
   return tool({
     description:
       "Deploy code from a git branch in an agent space as a preview. " +
-      "The code must be a Cloudflare Worker: an entry file (src/index.ts or index.ts) " +
-      "that exports a default fetch handler. For websites, write a worker that serves " +
-      "the HTML/CSS/JS as responses — do NOT write bare static files. " +
       "Always git_commit before deploying. Returns deployment metadata including a preview_url " +
       "you MUST share with the user. If the build fails, error details are returned — " +
       "fix the issues and redeploy.\n\n" +
-      "BUNDLING: The deploy pipeline uses @cloudflare/worker-bundler which runs esbuild " +
-      "under the hood. It auto-detects the entry point (src/index.ts, index.ts, src/index.js, etc.), " +
-      "resolves imports, and bundles everything into a single Worker module. " +
-      "npm packages are resolved from the file tree, so you MUST write a package.json with " +
-      "the dependencies you need (e.g. hono, itty-router) before committing and deploying. " +
-      "The bundler handles TypeScript natively — no tsconfig.json or build step required.",
+      "PROJECT STRUCTURE: Write a Cloudflare Worker with an entry file (src/index.ts or index.ts) " +
+      "that exports a default fetch handler. Write a package.json with npm dependencies " +
+      "(e.g. hono). The bundler handles TypeScript natively — no tsconfig.json or build step required.\n\n" +
+      "STATIC ASSETS: For websites with static files (HTML, CSS, images), create a wrangler.toml " +
+      "with an [assets] section:\n" +
+      "  name = \"my-app\"\n" +
+      "  main = \"src/index.ts\"\n" +
+      "  [assets]\n" +
+      "  directory = \"./public\"\n" +
+      "  not_found_handling = \"single-page-application\"  # optional, for SPAs\n\n" +
+      "Put static files in the configured directory (e.g. public/index.html, public/style.css). " +
+      "The deploy pipeline serves these automatically — the Worker only needs to handle " +
+      "API/dynamic routes. Static assets are served before the Worker runs.\n\n" +
+      "IMPORTANT: Use relative paths in HTML (href=\"style.css\" not href=\"/style.css\") " +
+      "so links work correctly when the preview is mounted on a sub-path. " +
+      "Root-relative paths are rewritten automatically but relative paths are most reliable.\n\n" +
+      "BUNDLING: The deploy pipeline uses @cloudflare/worker-bundler (esbuild). " +
+      "It auto-detects the entry point, resolves imports, and bundles into a Worker module. " +
+      "npm packages are fetched from the registry, so write a package.json with your dependencies.",
     inputSchema: z.object({
       space: spaceParam,
       branch: z.string().describe("Git branch name to deploy (e.g. 'release', 'main', 'feature/ui')"),

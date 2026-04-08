@@ -10,6 +10,7 @@ import { createGit, type Git, type GitLogEntry, type GitStatusEntry } from "@clo
 import type { Env } from "../env"
 import { handleInfoRefs, handleUploadPack, handleReceivePack, handleHead, type GitHttpContext } from "./git-smart-http"
 import { handleDeployCommand, type DeployContext } from "./deploy-engine"
+import { handleAssetRequest, buildAssetManifest, createMemoryStorage, type AssetConfig } from "@cloudflare/worker-bundler"
 
 // ─── SpaceDO ────────────────────────────────────────────────────────────────
 // Agent space Durable Object backed by @cloudflare/shell.
@@ -49,9 +50,15 @@ export class SpaceDO extends DurableObject<Env> {
         commit_hash TEXT NOT NULL,
         main_module TEXT NOT NULL,
         modules TEXT NOT NULL,
+        assets TEXT NOT NULL DEFAULT '{}',
+        asset_config TEXT NOT NULL DEFAULT '{}',
         deployed_at INTEGER NOT NULL
       )
     `)
+
+    // Migrate existing deployments tables that lack new columns
+    try { this.ctx.storage.sql.exec(`ALTER TABLE deployments ADD COLUMN assets TEXT NOT NULL DEFAULT '{}'`) } catch {}
+    try { this.ctx.storage.sql.exec(`ALTER TABLE deployments ADD COLUMN asset_config TEXT NOT NULL DEFAULT '{}'`) } catch {}
 
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS refs (
@@ -284,7 +291,7 @@ export class SpaceDO extends DurableObject<Env> {
 
     const row = this.ctx.storage.sql
       .exec(
-        "SELECT branch, commit_hash, main_module, modules FROM deployments WHERE branch = ?",
+        "SELECT branch, commit_hash, main_module, modules, assets, asset_config FROM deployments WHERE branch = ?",
         branch
       )
       .toArray()
@@ -297,6 +304,18 @@ export class SpaceDO extends DurableObject<Env> {
     const mainModule = r.main_module as string
     const modules = JSON.parse(r.modules as string) as Record<string, string | Record<string, unknown>>
     const commitHash = r.commit_hash as string
+    const assets = JSON.parse((r.assets as string) || "{}") as Record<string, string>
+    const assetConfig = JSON.parse((r.asset_config as string) || "{}") as AssetConfig
+
+    // Serve static assets host-side before forwarding to dynamic worker
+    if (Object.keys(assets).length > 0) {
+      const manifest = await buildAssetManifest(assets)
+      const storage = createMemoryStorage(assets)
+      const assetResponse = await handleAssetRequest(request, manifest, storage, assetConfig)
+      if (assetResponse) return assetResponse
+    }
+
+    // Fall through to dynamic worker for non-asset requests
     const spaceName = this.ctx.id.name ?? "space"
     const workerId = `${spaceName}-${branch}-${commitHash}`
 
@@ -320,13 +339,20 @@ export class SpaceDO extends DurableObject<Env> {
     // Preview routes: /space/:name/preview/:branch/*
     const previewMatch = path.match(/\/preview\/([^/]+)(\/.*)?$/)
     if (previewMatch) {
-      const branch = previewMatch[1]
+      const branch = decodeURIComponent(previewMatch[1])
+      const spaceName = this.ctx.id.name ?? "space"
+      const basePath = `/space/${spaceName}/preview/${encodeURIComponent(branch)}`
+
       // Rewrite the URL so the dynamic worker sees a clean path
       const subPath = previewMatch[2] || "/"
       const previewUrl = new URL(subPath, url.origin)
       previewUrl.search = url.search
       const previewRequest = new Request(previewUrl.toString(), request)
-      return this.servePreview(branch, previewRequest)
+      const response = await this.servePreview(branch, previewRequest)
+
+      // Rewrite root-relative paths in HTML responses so they resolve
+      // correctly when the preview is mounted on a sub-path
+      return rewritePreviewResponse(response, basePath)
     }
 
     const gitCtx: GitHttpContext = {
@@ -367,6 +393,39 @@ export class SpaceDO extends DurableObject<Env> {
 
     return new Response("Not Found", { status: 404 })
   }
+}
+
+// ─── Preview Response Rewriting ──────────────────────────────────────────────
+// When a preview is served on /space/:name/preview/:branch/, root-relative
+// paths like /style.css in HTML would resolve to the domain root instead of
+// the preview path. We rewrite them so the browser fetches the correct URL.
+
+function rewritePreviewResponse(response: Response, basePath: string): Response {
+  // Rewrite Location header on redirects
+  const location = response.headers.get("location")
+  if (location?.startsWith("/")) {
+    const rewritten = new Response(response.body, response)
+    rewritten.headers.set("location", basePath + location)
+    return rewritten
+  }
+
+  // Only rewrite HTML responses
+  const ct = response.headers.get("content-type") ?? ""
+  if (!ct.includes("text/html")) return response
+
+  // Use HTMLRewriter to prefix root-relative src/href/action attributes
+  return new HTMLRewriter()
+    .on("[src],[href],[action]", {
+      element(el) {
+        for (const attr of ["src", "href", "action"] as const) {
+          const val = el.getAttribute(attr)
+          if (val?.startsWith("/") && !val.startsWith("//")) {
+            el.setAttribute(attr, basePath + val)
+          }
+        }
+      },
+    })
+    .transform(response)
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

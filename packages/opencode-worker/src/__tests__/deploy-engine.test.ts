@@ -7,6 +7,13 @@ vi.mock("@cloudflare/worker-bundler", () => ({
     mainModule: "index.js",
     modules: { "index.js": "export default {}" },
   }),
+  createApp: vi.fn().mockResolvedValue({
+    mainModule: "index.js",
+    modules: { "index.js": "export default {}" },
+    assets: { "/index.html": "<h1>Hello</h1>", "/style.css": "body{}" },
+    assetManifest: new Map(),
+    assetConfig: { not_found_handling: "single-page-application" },
+  }),
 }))
 
 function makeMockCtx(files: Record<string, string>): DeployContext {
@@ -69,7 +76,9 @@ function makeMockCtx(files: Record<string, string>): DeployContext {
           commit_hash: args[2],
           main_module: args[3],
           modules: args[4],
-          deployed_at: args[5],
+          assets: args[5],
+          asset_config: args[6],
+          deployed_at: args[7],
         })
       }
       return { toArray: () => rows, rowsWritten: 0 }
@@ -101,6 +110,7 @@ describe("deploy-engine", () => {
     expect(res.status).toBe(200)
     expect(data.branch).toBe("main")
     expect(data.commit_hash).toBe("abc123")
+    expect(data.has_assets).toBe(false)
 
     // Verify glob was called (not just readDir)
     expect(ctx.workspace.glob).toHaveBeenCalledWith("**/*")
@@ -126,6 +136,60 @@ describe("deploy-engine", () => {
     expect(res.status).toBe(400)
     expect(data.error).toBe("Build failed")
     expect(data.details).toContain("Syntax error")
+  })
+
+  it("deploys with static assets when wrangler.toml has [assets]", async () => {
+    const ctx = makeMockCtx({
+      "src/index.ts": 'export default { async fetch() { return new Response("api"); } };',
+      "wrangler.toml": 'name = "test"\nmain = "src/index.ts"\n\n[assets]\ndirectory = "./public"\nnot_found_handling = "single-page-application"',
+      "public/index.html": "<h1>Hello</h1>",
+      "public/style.css": "body { margin: 0 }",
+    })
+
+    const req = new Request("http://test/?cmd=deploy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch: "main" }),
+    })
+
+    const res = await handleDeployCommand(ctx, "deploy", req)
+    const data = await res.json() as any
+
+    if (res.status !== 200) console.log("deploy response:", data)
+
+    expect(res.status).toBe(200)
+    expect(data.branch).toBe("main")
+    expect(data.has_assets).toBe(true)
+
+    // Verify createApp was called instead of createWorker
+    const { createApp } = await import("@cloudflare/worker-bundler")
+    expect(createApp).toHaveBeenCalled()
+    const callArgs = (createApp as any).mock.calls[0][0]
+    expect(callArgs.assets).toHaveProperty("/index.html")
+    expect(callArgs.assets).toHaveProperty("/style.css")
+    expect(callArgs.assetConfig).toEqual({ not_found_handling: "single-page-application" })
+  })
+
+  it("falls back to createWorker when no [assets] configured", async () => {
+    const ctx = makeMockCtx({
+      "src/index.ts": 'export default { async fetch() { return new Response("ok"); } };',
+      "wrangler.toml": 'name = "test"\nmain = "src/index.ts"',
+    })
+
+    const req = new Request("http://test/?cmd=deploy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ branch: "main" }),
+    })
+
+    const res = await handleDeployCommand(ctx, "deploy", req)
+    const data = await res.json() as any
+
+    expect(res.status).toBe(200)
+    expect(data.has_assets).toBe(false)
+
+    const { createWorker } = await import("@cloudflare/worker-bundler")
+    expect(createWorker).toHaveBeenCalled()
   })
 
   it("fails with empty branch", async () => {

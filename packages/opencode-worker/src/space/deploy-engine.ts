@@ -1,7 +1,8 @@
 import type { Git } from "@cloudflare/shell/git"
 import type { Workspace } from "@cloudflare/shell"
-import { createWorker } from "@cloudflare/worker-bundler"
+import { createApp, createWorker, type AssetConfig, type Modules } from "@cloudflare/worker-bundler"
 import { jsonResponse } from "./git-pack"
+import { parseWranglerConfig } from "./wrangler-config"
 
 // ─── Deploy Engine ──────────────────────────────────────────────────────────
 
@@ -86,22 +87,57 @@ async function deployBranch(
     return jsonResponse({ error: `No files found in branch "${branch}"` }, 400)
   }
 
+  // Parse child project's wrangler config for assets + entry point
+  const wranglerCfg = parseWranglerConfig(files)
+
   let mainModule: string
   let serializedModules: Record<string, string | Record<string, unknown>>
+  let serializedAssets: Record<string, string> = {}
+  let assetConfig: AssetConfig | undefined
 
   try {
-    const result = await createWorker({ files })
-    mainModule = result.mainModule
-    serializedModules = {}
-    for (const [name, value] of Object.entries(result.modules)) {
-      serializedModules[name] = typeof value === "string" ? value : (value as Record<string, unknown>)
+    // Collect static assets from configured directory
+    const assetsDir = wranglerCfg.assets?.directory?.replace(/^\.?\//, "").replace(/\/$/, "")
+    const collectedAssets: Record<string, string> = {}
+
+    if (assetsDir) {
+      for (const [path, content] of Object.entries(files)) {
+        if (path.startsWith(assetsDir + "/") || path === assetsDir) {
+          // Map to URL pathname: public/index.html → /index.html
+          const urlPath = "/" + path.slice(assetsDir.length + 1)
+          collectedAssets[urlPath] = content
+        }
+      }
+
+      assetConfig = {}
+      if (wranglerCfg.assets?.notFoundHandling) assetConfig.not_found_handling = wranglerCfg.assets.notFoundHandling
+      if (wranglerCfg.assets?.htmlHandling) assetConfig.html_handling = wranglerCfg.assets.htmlHandling
     }
 
-    // Inject __STATIC_CONTENT_MANIFEST if the bundler left it as an external import.
-    // Many frameworks (Hono, Workers Sites) import this Wrangler-injected module;
-    // Dynamic Workers don't provide it automatically, so we supply an empty manifest.
-    if (!serializedModules["__STATIC_CONTENT_MANIFEST"]) {
-      serializedModules["__STATIC_CONTENT_MANIFEST"] = { text: "{}" }
+    const hasAssets = Object.keys(collectedAssets).length > 0
+
+    if (hasAssets) {
+      // Full-stack build: server + client + static assets
+      const result = await createApp({
+        files,
+        assets: collectedAssets,
+        assetConfig,
+        server: wranglerCfg.main,
+      })
+      mainModule = result.mainModule
+      serializedModules = serializeModules(result.modules)
+      serializedAssets = serializeAssets(result.assets)
+      assetConfig = result.assetConfig
+    } else {
+      // Server-only build (no assets)
+      const result = await createWorker({ files, entryPoint: wranglerCfg.main })
+      mainModule = result.mainModule
+      serializedModules = serializeModules(result.modules)
+
+      // Inject __STATIC_CONTENT_MANIFEST if the bundler left it as an external import.
+      if (!serializedModules["__STATIC_CONTENT_MANIFEST"]) {
+        serializedModules["__STATIC_CONTENT_MANIFEST"] = { text: "{}" }
+      }
     }
   } catch (e: any) {
     return jsonResponse({
@@ -112,19 +148,26 @@ async function deployBranch(
 
   const now = Date.now()
   ctx.sql.exec(
-    `INSERT OR REPLACE INTO deployments (branch, commit_hash, main_module, modules, deployed_at)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO deployments
+     (branch, commit_hash, main_module, modules, assets, asset_config, deployed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     branch,
     commitHash,
     mainModule,
     JSON.stringify(serializedModules),
+    JSON.stringify(serializedAssets),
+    assetConfig ? JSON.stringify(assetConfig) : "{}",
     now
   )
+
+  const compatDate = wranglerCfg.compatibilityDate
 
   return jsonResponse({
     branch,
     commit_hash: commitHash,
     main_module: mainModule,
+    has_assets: Object.keys(serializedAssets).length > 0,
+    compatibility_date: compatDate,
     deployed_at: new Date(now).toISOString(),
   })
 }
@@ -143,7 +186,7 @@ async function getDeployment(
 
   const row = ctx.sql
     .exec(
-      "SELECT branch, commit_hash, main_module, modules, deployed_at FROM deployments WHERE branch = ?",
+      "SELECT branch, commit_hash, main_module, modules, assets, asset_config, deployed_at FROM deployments WHERE branch = ?",
       branch
     )
     .toArray()
@@ -153,11 +196,13 @@ async function getDeployment(
   }
 
   const r = row[0]
+  const assets = JSON.parse((r.assets as string) || "{}")
   return jsonResponse({
     branch: r.branch as string,
     commit_hash: r.commit_hash as string,
     main_module: r.main_module as string,
     modules: JSON.parse(r.modules as string),
+    has_assets: Object.keys(assets).length > 0,
     deployed_at: new Date(r.deployed_at as number).toISOString(),
   })
 }
@@ -166,15 +211,19 @@ async function getDeployment(
 
 async function listDeployments(ctx: DeployContext): Promise<Response> {
   const rows = ctx.sql
-    .exec("SELECT branch, commit_hash, main_module, deployed_at FROM deployments ORDER BY deployed_at DESC")
+    .exec("SELECT branch, commit_hash, main_module, assets, deployed_at FROM deployments ORDER BY deployed_at DESC")
     .toArray()
 
-  const deployments = rows.map((r) => ({
-    branch: r.branch as string,
-    commit_hash: r.commit_hash as string,
-    main_module: r.main_module as string,
-    deployed_at: new Date(r.deployed_at as number).toISOString(),
-  }))
+  const deployments = rows.map((r) => {
+    const assets = JSON.parse((r.assets as string) || "{}")
+    return {
+      branch: r.branch as string,
+      commit_hash: r.commit_hash as string,
+      main_module: r.main_module as string,
+      has_assets: Object.keys(assets).length > 0,
+      deployed_at: new Date(r.deployed_at as number).toISOString(),
+    }
+  })
 
   return jsonResponse(deployments)
 }
@@ -201,4 +250,27 @@ async function undeployBranch(
   }
 
   return jsonResponse({ ok: true, branch })
+}
+
+// ─── Serialization helpers ───────────────────────────────────────────────────
+
+function serializeModules(modules: Modules): Record<string, string | Record<string, unknown>> {
+  const out: Record<string, string | Record<string, unknown>> = {}
+  for (const [name, value] of Object.entries(modules)) {
+    out[name] = typeof value === "string" ? value : (value as Record<string, unknown>)
+  }
+  return out
+}
+
+function serializeAssets(
+  assets: Record<string, string | ArrayBuffer>
+): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [path, content] of Object.entries(assets)) {
+    // Store text as-is; encode binary as base64
+    out[path] = typeof content === "string"
+      ? content
+      : btoa(String.fromCharCode(...new Uint8Array(content)))
+  }
+  return out
 }
