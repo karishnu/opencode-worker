@@ -5,6 +5,7 @@ import type { SpaceMapping } from "../tools"
 import { getLanguageModel } from "../provider/registry"
 import { createTools } from "../tools"
 import { runAgentLoop } from "./agent-loop"
+import * as Skill from "../skill"
 
 // ── Sortable ID generation (compatible with OpenCode TUI) ─────────
 
@@ -511,9 +512,23 @@ export class SessionDO extends DurableObject<Env> {
       }
       const tools = createTools({ env: this.env, sessionId, host, spaceStore })
 
+      const skills = Skill.all()
+      const system: string[] = [
+        `You are powered by the model ${modelId} (${providerId}/${modelId}).`,
+        `Today's date: ${new Date().toDateString()}`,
+      ]
+      if (skills.length > 0) {
+        system.push([
+          "Skills provide specialized instructions and workflows for specific tasks.",
+          "Use the skill tool to load a skill when a task matches its description.",
+          Skill.fmt(skills, { verbose: true }),
+        ].join("\n"))
+      }
+
       await runAgentLoop({
         model,
         tools,
+        system,
         getMessages,
         sessionId,
         signal: this.abortController.signal,

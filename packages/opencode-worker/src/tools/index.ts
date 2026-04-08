@@ -2,6 +2,7 @@ import type { SpaceDO } from "../space/durable-object"
 import type { Env } from "../env"
 import { tool } from "ai"
 import { z } from "zod"
+import * as Skill from "../skill"
 
 export interface SpaceMapping {
   sessionId: string
@@ -57,6 +58,7 @@ export function createTools(ctx: ToolsContext) {
     attach_space: createAttachSpaceTool(ctx),
     detach_space: createDetachSpaceTool(ctx),
     list_session_spaces: createListSessionSpacesTool(ctx),
+    skill: createSkillTool(),
   }
 }
 
@@ -372,6 +374,51 @@ function createCurlTool() {
         headers: resHeaders,
         body: text.length > maxLen ? text.slice(0, maxLen) + "\n[truncated]" : text,
       }, null, 2)
+    },
+  })
+}
+
+// ── Skill Tool ────────────────────────────────────────────────────
+
+function createSkillTool() {
+  const list = Skill.all()
+  const examples = list.map((s) => `'${s.name}'`).slice(0, 3).join(", ")
+  const hint = examples.length > 0 ? ` (e.g., ${examples}, ...)` : ""
+
+  const description =
+    list.length === 0
+      ? "Load a specialized skill that provides domain-specific instructions and workflows. No skills are currently available."
+      : [
+          "Load a specialized skill that provides domain-specific instructions and workflows.",
+          "",
+          "When you recognize that a task matches one of the available skills listed below, use this tool to load the full skill instructions.",
+          "",
+          'Tool output includes a `<skill_content name="...">` block with the loaded content.',
+          "",
+          "The following skills provide specialized sets of instructions for particular tasks",
+          "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
+          "",
+          Skill.fmt(list, { verbose: false }),
+        ].join("\n")
+
+  return tool({
+    description,
+    inputSchema: z.object({
+      name: z.string().describe(`The name of the skill from available_skills${hint}`),
+    }),
+    execute: async (args) => {
+      const skill = Skill.get(args.name)
+      if (!skill) {
+        const names = Skill.all().map((s) => s.name).join(", ")
+        throw new Error(`Skill "${args.name}" not found. Available skills: ${names || "none"}`)
+      }
+      return [
+        `<skill_content name="${skill.name}">`,
+        `# Skill: ${skill.name}`,
+        "",
+        skill.content.trim(),
+        "</skill_content>",
+      ].join("\n")
     },
   })
 }

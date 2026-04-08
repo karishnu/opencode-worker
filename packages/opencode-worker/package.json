@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "gen:skills": "node scripts/gen-skill-manifest.mjs",
+    "predev": "npm run gen:skills",
     "dev": "wrangler dev --config ../../wrangler.toml",
+    "predeploy": "npm run gen:skills",
     "deploy": "wrangler deploy --config ../../wrangler.toml",
     "test": "vitest run",
     "test:watch": "vitest",

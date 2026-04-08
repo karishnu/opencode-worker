@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import type { Env } from "../env"
 import type { AgentInfo } from "../upstream-types"
+import * as Skill from "../skill"
 
 /**
  * Stub routes for upstream endpoints that don't apply in Worker mode
@@ -25,7 +26,7 @@ export function stubRoutes(): Hono<{ Bindings: Env }> {
   })
 
   // ── Skill ─────────────────────────────────────────────────────
-  app.get("/skill", (c) => c.json([]))
+  app.get("/skill", (c) => c.json(Skill.all()))
 
   // ── Command ───────────────────────────────────────────────────
   app.get("/command", (c) => c.json([]))

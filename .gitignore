@@ -4,3 +4,6 @@ dist/
 .dev.vars
 *.log
 .DS_Store
+
+# Auto-generated skill manifest (run gen:skills to regenerate)
+packages/opencode-worker/src/skill/manifest.ts

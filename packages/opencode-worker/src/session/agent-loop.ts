@@ -7,6 +7,7 @@ const MAX_TOOL_ROUNDS = 25
 export interface AgentLoopInput {
   model: LanguageModelV3
   tools: Record<string, any>
+  system: string[]
   getMessages: () => StoredMessage[]
   sessionId: string
   signal: AbortSignal
@@ -98,7 +99,7 @@ function toUIMessages(stored: StoredMessage[]): UIMessage[] {
  * and avoid MissingToolResultsError.
  */
 export async function runAgentLoop(input: AgentLoopInput): Promise<void> {
-  const { model, tools, getMessages, sessionId, signal, onEvent } = input
+  const { model, tools, system, getMessages, sessionId, signal, onEvent } = input
 
   // Add invalid tool for experimental_repairToolCall (from upstream llm.ts)
   const allTools: Record<string, any> = {
@@ -135,6 +136,7 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<void> {
     const result = streamText({
       model,
       tools: allTools,
+      system: system.length > 0 ? system.join("\n\n") : undefined,
       messages,
       abortSignal: signal,
       activeTools: Object.keys(allTools).filter((x) => x !== "invalid"),
