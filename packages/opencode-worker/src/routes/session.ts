@@ -27,14 +27,10 @@ export function sessionRoutes(): Hono<{ Bindings: Env }> {
   app.post("/", async (c) => {
     const body = await c.req.json().catch(() => ({}) as Record<string, unknown>)
     const stub = getMainDO(c.env)
-    const session = await stub.createSession(undefined, body.title as string | undefined)
-
-    // Broadcast session created
-    await stub.broadcast({
-      type: "session.updated",
-      properties: { info: session },
-    })
-
+    const session = await stub.createSessionAndBroadcast(
+      undefined,
+      body.title as string | undefined,
+    )
     return c.json(session)
   })
 
@@ -109,19 +105,24 @@ export function sessionRoutes(): Hono<{ Bindings: Env }> {
     return c.json(msg)
   })
 
-  // ── Send prompt → forward to DO ───────────────────────────────
+  // ── Send prompt (async — returns 204, agent loop runs in DO background) ──
   app.post("/:sessionID/message", async (c) => {
     const stub = getMainDO(c.env)
-    return stub.fetch(c.req.raw)
+    const body = await c.req.json().catch(() => ({}))
+    const host = new URL(c.req.url).origin
+    const err = await stub.prompt(c.req.param("sessionID"), body, host)
+    if (err) return c.json({ error: err }, 400)
+    return c.body(null, 204)
   })
 
-  // ── Send async prompt → rewrite to /message, forward to DO ────
+  // ── Send async prompt (same as /message) ───────────────────────
   app.post("/:sessionID/prompt_async", async (c) => {
     const stub = getMainDO(c.env)
-    const url = new URL(c.req.url)
-    url.pathname = url.pathname.replace("/prompt_async", "/message")
-    const newReq = new Request(url.toString(), c.req.raw)
-    return stub.fetch(newReq)
+    const body = await c.req.json().catch(() => ({}))
+    const host = new URL(c.req.url).origin
+    const err = await stub.prompt(c.req.param("sessionID"), body, host)
+    if (err) return c.json({ error: err }, 400)
+    return c.body(null, 204)
   })
 
   // ── Abort ─────────────────────────────────────────────────────
@@ -207,11 +208,14 @@ export function sessionRoutes(): Hono<{ Bindings: Env }> {
     return _c.json(true)
   })
 
-  // ── Command (stub) ────────────────────────────────────────────
+  // ── Command (rewrite as prompt) ────────────────────────────
   app.post("/:sessionID/command", async (c) => {
-    // Rewrite as a message request and forward to DO
     const stub = getMainDO(c.env)
-    return stub.fetch(c.req.raw)
+    const body = await c.req.json().catch(() => ({}))
+    const host = new URL(c.req.url).origin
+    const err = await stub.prompt(c.req.param("sessionID"), body, host)
+    if (err) return c.json({ error: err }, 400)
+    return c.body(null, 204)
   })
 
   // ── Shell (stub) ──────────────────────────────────────────────

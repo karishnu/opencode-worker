@@ -12,6 +12,10 @@ class_name = "SessionDO"
 name = "SPACE_DO"
 class_name = "SpaceDO"
 
+# AI binding (for AI Gateway zero-config fallback)
+[ai]
+binding = "AI"
+
 # Worker loader for deploy engine (Dynamic Workers)
 [[worker_loaders]]
 binding = "LOADER"

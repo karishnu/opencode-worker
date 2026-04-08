@@ -103,6 +103,7 @@ export type SessionEvent =
   | { type: "session.created"; session: InternalSessionInfo }
   | { type: "session.updated"; session: Partial<InternalSessionInfo> & { id: string } }
   | { type: "message.created"; message: SessionMessage }
+  | { type: "step.start"; sessionId: string; messageId: string }
   | { type: "text.start"; sessionId: string; messageId: string }
   | { type: "text.end"; sessionId: string; messageId: string }
   | { type: "message.delta"; sessionId: string; messageId: string; delta: string }

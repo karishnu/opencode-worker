@@ -12,6 +12,9 @@ export interface Env {
   // Worker loader for deploy engine (Dynamic Workers)
   LOADER: WorkerLoader
 
+  // AI binding (optional — for AI Gateway zero-config fallback)
+  AI?: Ai
+
   // LLM provider API keys
   ANTHROPIC_API_KEY?: string
   OPENAI_API_KEY?: string

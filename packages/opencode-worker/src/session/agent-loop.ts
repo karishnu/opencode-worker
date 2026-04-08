@@ -124,6 +124,11 @@ export async function runAgentLoop(input: AgentLoopInput): Promise<void> {
   while (round < MAX_TOOL_ROUNDS) {
     if (signal.aborted) break
 
+    // Emit step-start at the beginning of each round (upstream pattern).
+    // convertToModelMessages splits on step-start boundaries, creating
+    // separate assistant(tool_use) / tool(tool_result) pairs per round.
+    await onEvent({ type: "step.start", sessionId, messageId: "" })
+
     // Convert UIMessages → ModelMessages via AI SDK (handles tool-call/result pairing)
     const messages = await convertToModelMessages(uiMessages, { tools: allTools })
 

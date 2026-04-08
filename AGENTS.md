@@ -114,6 +114,11 @@ Tests use `@cloudflare/vitest-pool-workers` and run inside the Workers runtime. 
 - SSE event shapes must match upstream `BusEventPayload` types
 - StoredMessage/StoredPart shapes must be compatible with upstream TUI parsing
 - When upstream client expects an endpoint, return a valid stub (see `routes/stubs.ts`)
+- **Message history must match upstream's structure** — when in doubt, read the upstream source at `upstream/opencode/packages/opencode/src/session/message-v2.ts` (especially `toModelMessagesEffect`). Key invariants:
+  - `step-start` parts must be emitted at the beginning of **each agent-loop round**, not once per message. `convertToModelMessages` splits on `step-start` boundaries to produce alternating `assistant(tool_use)` / `tool(tool_result)` pairs. Without per-round step-starts, Anthropic rejects the request.
+  - `toUIMessages` must pass `step-start` parts through to the UIMessage so `convertToModelMessages` can use them as block delimiters.
+  - Pending/running tool calls must be converted to `output-error` state so every `tool_use` has a matching `tool_result`.
+  - The DO stores one assistant message per prompt (all rounds), with step-start parts separating rounds. The agent loop's internal per-round UIMessages are ephemeral.
 
 ## File Map
 

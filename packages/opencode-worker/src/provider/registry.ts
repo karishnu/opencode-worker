@@ -24,6 +24,13 @@ function hasGateway(env: Env): boolean {
 }
 
 /**
+ * True when the AI binding is available (zero-config gateway fallback).
+ */
+function hasAiBinding(env: Env): boolean {
+  return !!env.AI
+}
+
+/**
  * Build a LanguageModelV3 instance from provider + model IDs.
  *
  * When Cloudflare AI Gateway credentials are set, requests are
@@ -33,12 +40,12 @@ function hasGateway(env: Env): boolean {
  *
  * Without gateway creds, each provider requires its own API key.
  */
-export function getLanguageModel(
+export async function getLanguageModel(
   providerId: string,
   modelId: string,
   env: Env,
-): LanguageModelV3 {
-  // ── Gateway-routed path ─────────────────────────────────────────
+): Promise<LanguageModelV3> {
+  // ── 1. Gateway-routed path (CF secrets) ───────────────────────────
   if (hasGateway(env)) {
     const gw = createAiGateway({
       accountId: env.CLOUDFLARE_ACCOUNT_ID!,
@@ -70,25 +77,62 @@ export function getLanguageModel(
     }
   }
 
-  // ── Direct path (no gateway) ────────────────────────────────────
+  // ── 2. Direct path (provider API keys) ────────────────────────────
+  const directKey = providerKey(env, providerId)
+  if (directKey) {
+    switch (providerId) {
+      case "anthropic":
+        return createAnthropic({ apiKey: directKey })(modelId)
+      case "openai":
+        return createOpenAI({ apiKey: directKey })(modelId)
+      case "google":
+        return createGoogleGenerativeAI({ apiKey: directKey })(modelId)
+      default:
+        throw new Error(`Unknown provider: ${providerId}`)
+    }
+  }
+
+  // ── 3. AI binding fallback (zero-config gateway) ──────────────────
+  if (hasAiBinding(env)) {
+    const gatewayId = env.CLOUDFLARE_GATEWAY_ID ?? "default"
+    let baseURL: string
+    try {
+      baseURL = await env.AI!.gateway(gatewayId).getUrl(providerId)
+    } catch (e) {
+      throw new Error(
+        `AI Gateway "${gatewayId}" error for ${providerId} — ` +
+        `create the gateway in your CF dashboard or set a provider API key directly. ` +
+        `Original: ${e instanceof Error ? e.message : e}`,
+      )
+    }
+    // SDK providers validate apiKey even when baseURL points to the
+    // gateway (which handles auth via BYOK). Pass the real key if
+    // available, otherwise a placeholder to satisfy validation.
+    const key = providerKey(env, providerId) ?? "sk-aig"
+    switch (providerId) {
+      case "anthropic":
+        return createAnthropic({ baseURL, apiKey: key })(modelId)
+      case "openai":
+        return createOpenAI({ baseURL, apiKey: key })(modelId)
+      case "google":
+        return createGoogleGenerativeAI({ baseURL, apiKey: key })(modelId)
+      default:
+        throw new Error(`Unknown provider: ${providerId}`)
+    }
+  }
+
+  throw new Error(`${providerId} not configured — set an API key or enable the [ai] binding`)
+}
+
+/**
+ * Get the provider-specific API key, if set.
+ */
+function providerKey(env: Env, providerId: string): string | undefined {
   switch (providerId) {
-    case "anthropic": {
-      const apiKey = env.ANTHROPIC_API_KEY
-      if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured")
-      return createAnthropic({ apiKey })(modelId)
-    }
-    case "openai": {
-      const apiKey = env.OPENAI_API_KEY
-      if (!apiKey) throw new Error("OPENAI_API_KEY not configured")
-      return createOpenAI({ apiKey })(modelId)
-    }
-    case "google": {
-      const apiKey = env.GOOGLE_API_KEY
-      if (!apiKey) throw new Error("GOOGLE_API_KEY not configured")
-      return createGoogleGenerativeAI({ apiKey })(modelId)
-    }
-    default:
-      throw new Error(`Unknown provider: ${providerId}`)
+    case "anthropic": return env.ANTHROPIC_API_KEY
+    case "openai": return env.OPENAI_API_KEY
+    case "google": return env.GOOGLE_API_KEY
+    default: return undefined
   }
 }
 
@@ -100,9 +144,10 @@ export function getLanguageModel(
  */
 export function listProviders(env: Env): Array<{ id: string; name: string; configured: boolean }> {
   const gw = hasGateway(env)
+  const ai = hasAiBinding(env)
   return [
-    { id: "anthropic", name: "Anthropic", configured: gw || !!env.ANTHROPIC_API_KEY },
-    { id: "openai", name: "OpenAI", configured: gw || !!env.OPENAI_API_KEY },
-    { id: "google", name: "Google", configured: gw || !!env.GOOGLE_API_KEY },
+    { id: "anthropic", name: "Anthropic", configured: gw || ai || !!env.ANTHROPIC_API_KEY },
+    { id: "openai", name: "OpenAI", configured: gw || ai || !!env.OPENAI_API_KEY },
+    { id: "google", name: "Google", configured: gw || ai || !!env.GOOGLE_API_KEY },
   ]
 }

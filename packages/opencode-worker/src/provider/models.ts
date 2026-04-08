@@ -1,10 +1,84 @@
 import type { ProviderModel } from "../upstream-types"
 
+const MODELS_DEV_URL = "https://models.dev/api.json"
+const CACHE_TTL = 60 * 60 * 1000 // 1 hour
+
+let cached: Record<string, ProviderModel[]> | undefined
+let cachedAt = 0
+
+/**
+ * Supported provider IDs we can actually route requests to.
+ */
+const SUPPORTED = new Set(["anthropic", "openai", "google"])
+
+/**
+ * Fetch models from models.dev and parse into ProviderModel shape.
+ * Returns undefined on failure.
+ */
+async function fetchModels(): Promise<Record<string, ProviderModel[]> | undefined> {
+  try {
+    const res = await fetch(MODELS_DEV_URL, { signal: AbortSignal.timeout(5000) })
+    if (!res.ok) return undefined
+    const data = await res.json() as Record<string, {
+      id: string
+      name: string
+      models: Record<string, {
+        id: string
+        name: string
+        reasoning?: boolean
+        attachment?: boolean
+        cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number }
+        limit: { context: number; output: number }
+        modalities?: { input?: string[]; output?: string[] }
+      }>
+    }>
+    const result: Record<string, ProviderModel[]> = {}
+    for (const [pid, provider] of Object.entries(data)) {
+      if (!SUPPORTED.has(pid)) continue
+      result[pid] = Object.values(provider.models).map((m) => ({
+        id: m.id,
+        name: m.name,
+        provider: pid,
+        context_length: m.limit.context,
+        reasoning: m.reasoning,
+        attachment: m.attachment,
+        cost: m.cost ? {
+          input: m.cost.input ?? 0,
+          output: m.cost.output ?? 0,
+          cache_read: m.cost.cache_read,
+          cache_write: m.cost.cache_write,
+        } : undefined,
+      }))
+    }
+    return result
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Get models for a provider. Tries cached models.dev data first,
+ * falls back to static PROVIDER_MODELS.
+ */
+export async function getModels(providerId: string): Promise<Record<string, ProviderModel>> {
+  if (!cached || Date.now() - cachedAt > CACHE_TTL) {
+    const fresh = await fetchModels()
+    if (fresh) {
+      cached = fresh
+      cachedAt = Date.now()
+    }
+  }
+  const list = cached?.[providerId] ?? PROVIDER_MODELS[providerId] ?? []
+  const models: Record<string, ProviderModel> = {}
+  for (const m of list) models[m.id] = m
+  return models
+}
+
 /**
  * Static model catalog for all providers.
  *
- * Used by the /config/providers and /provider routes to tell
- * the client which models are available for selection.
+ * Used as fallback when models.dev fetch fails.
+ * Also used by the /config/providers and /provider routes.
  */
 export const PROVIDER_MODELS: Record<string, ProviderModel[]> = {
   anthropic: [
@@ -83,4 +157,12 @@ export function buildModels(providerId: string): Record<string, ProviderModel> {
     models[m.id] = m
   }
   return models
+}
+
+/**
+ * Reset the models.dev cache (for testing).
+ */
+export function resetModelsCache() {
+  cached = undefined
+  cachedAt = 0
 }

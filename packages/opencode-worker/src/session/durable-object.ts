@@ -123,15 +123,10 @@ export class SessionDO extends DurableObject<Env> {
       return this.handleSSE()
     }
 
-    // POST /session/:id/message — send prompt
+    // GET /session/:id/message — get messages
     const msgMatch = path.match(/^\/session\/([^/]+)\/message$/)
-    if (msgMatch) {
-      if (request.method === "POST") {
-        return this.handleMessage(request, msgMatch[1])
-      }
-      if (request.method === "GET") {
-        return this.handleGetMessages(msgMatch[1], url.searchParams)
-      }
+    if (msgMatch && request.method === "GET") {
+      return this.handleGetMessages(msgMatch[1], url.searchParams)
     }
 
     return new Response("Not found", { status: 404 })
@@ -212,6 +207,15 @@ export class SessionDO extends DurableObject<Env> {
       JSON.stringify(session),
       now,
     )
+    return session
+  }
+
+  async createSessionAndBroadcast(id?: string, title?: string): Promise<Session> {
+    const session = this.createSession(id, title)
+    await this.broadcast({
+      type: "session.updated",
+      properties: { info: session },
+    })
     return session
   }
 
@@ -349,16 +353,17 @@ export class SessionDO extends DurableObject<Env> {
 
   // ── Message Handling (full TUI SSE event protocol) ─────────────
 
-  private async handleMessage(
-    request: Request,
-    sessionId: string,
-  ): Promise<Response> {
-    const body = (await request.json()) as PromptRequest
-
-    // Extract text from parts or content
+  /**
+   * Public RPC entry point for prompt submission.
+   * Validates input synchronously, then fires-and-forgets the agent loop
+   * so the caller (Worker route) can return 204 immediately.
+   * The DO stays alive thanks to open SSE connections.
+   */
+  prompt(sessionId: string, body: Record<string, unknown>, host: string): string | null {
+    const parsed = body as PromptRequest
     const text =
-      body.content ||
-      (body.parts || [])
+      parsed.content ||
+      (parsed.parts || [])
         .filter(
           (p): p is { type: string; text: string } =>
             (p.type === "text" || p.type === "input") && !!p.text,
@@ -367,13 +372,21 @@ export class SessionDO extends DurableObject<Env> {
         .join("\n")
         .trim()
 
-    if (!text) {
-      return new Response(
-        JSON.stringify({ error: "Message content is required" }),
-        { status: 400, headers: { "Content-Type": "application/json" } },
-      )
-    }
+    if (!text) return "Message content is required"
 
+    // Fire-and-forget — agent loop runs in background, events broadcast via SSE
+    this.runPrompt(sessionId, parsed, text, host).catch((e) =>
+      console.error("[prompt] unhandled error:", e),
+    )
+    return null
+  }
+
+  private async runPrompt(
+    sessionId: string,
+    body: PromptRequest,
+    text: string,
+    host: string,
+  ): Promise<void> {
     // Resolve model/provider
     const providerId =
       body.model?.providerID || body.providerID || "anthropic"
@@ -385,12 +398,11 @@ export class SessionDO extends DurableObject<Env> {
     const userTextPartId = generateId("prt")
     const assistantMessageId = generateId("msg")
     const assistantTextPartId = generateId("prt")
-    const stepStartPartId = generateId("prt")
     const stepFinishPartId = generateId("prt")
     const now = Date.now()
 
     console.log(
-      `[handleMessage] session=${sessionId} provider=${providerId} model=${modelId}`,
+      `[runPrompt] session=${sessionId} provider=${providerId} model=${modelId}`,
     )
     console.log("SSE connections:", this.sseWriters.size)
 
@@ -471,23 +483,7 @@ export class SessionDO extends DurableObject<Env> {
       properties: { sessionID: sessionId, status: { type: "busy" } },
     })
 
-    // ── Step 3: Broadcast step-start ─────────────────────────────
-
-    await this.broadcast({
-      type: "message.part.updated",
-      properties: {
-        sessionID: sessionId,
-        time: Date.now(),
-        part: {
-          id: stepStartPartId,
-          sessionID: sessionId,
-          messageID: assistantMessageId,
-          type: "step-start",
-        },
-      },
-    })
-
-    // ── Step 4: Run AI ───────────────────────────────────────────
+    // ── Step 3: Run AI ─────────────────────────────────────────────
 
     let fullText = ""
     let reasoningText = ""
@@ -506,14 +502,13 @@ export class SessionDO extends DurableObject<Env> {
       // getMessages callback for agent loop (re-reads from DB each call)
       const getMessages = () => this.getMessagesForSession(sessionId)
 
-      const model = getLanguageModel(providerId, modelId, this.env)
+      const model = await getLanguageModel(providerId, modelId, this.env)
       const spaceStore = {
         add: (name: string) => this.addSessionSpace(sessionId, name),
         remove: (name: string) => this.removeSessionSpace(sessionId, name),
         list: () => this.getSessionSpaces(sessionId),
         has: (name: string) => this.hasSessionSpace(sessionId, name),
       }
-      const host = new URL(request.url).origin
       const tools = createTools({ env: this.env, sessionId, host, spaceStore })
 
       await runAgentLoop({
@@ -524,6 +519,32 @@ export class SessionDO extends DurableObject<Env> {
         signal: this.abortController.signal,
         onEvent: async (event: SessionEvent) => {
           switch (event.type) {
+            case "step.start": {
+              // Emit step-start per round (upstream pattern).
+              // convertToModelMessages splits on step-start boundaries,
+              // producing separate assistant/tool pairs per round.
+              const partId = generateId("prt")
+              orderedParts.push({
+                id: partId,
+                sessionID: sessionId,
+                messageID: assistantMessageId,
+                type: "step-start",
+              })
+              await this.broadcast({
+                type: "message.part.updated",
+                properties: {
+                  sessionID: sessionId,
+                  time: Date.now(),
+                  part: {
+                    id: partId,
+                    sessionID: sessionId,
+                    messageID: assistantMessageId,
+                    type: "step-start",
+                  },
+                },
+              })
+              break
+            }
             case "text.start": {
               // Create a new text part for this segment (upstream pattern)
               const partId = generateId("prt")
@@ -549,7 +570,6 @@ export class SessionDO extends DurableObject<Env> {
                 currentTextPart.text = (currentTextPart.text || "") + delta
               }
               const partId = currentTextPart?.id || assistantTextPartId
-              console.log(`[message.delta] +${delta.length} chars, total: ${fullText.length}`)
               await this.broadcast({
                 type: "message.part.delta",
                 properties: {
@@ -639,7 +659,6 @@ export class SessionDO extends DurableObject<Env> {
                 state: { status: "running", input: tc.arguments, raw, time: { start: Date.now() } },
               }
               orderedParts.push(part)
-              console.log(`[tool.called] ${tc.name} (${partId})`)
               await this.broadcast({
                 type: "message.part.updated",
                 properties: { sessionID: sessionId, time: Date.now(), part },
@@ -675,9 +694,6 @@ export class SessionDO extends DurableObject<Env> {
                         time: { start, end: Date.now() },
                       }
                 }
-                console.log(
-                  `[tool.result] ${tr.name}${tr.isError ? " ERROR" : ""} → ${(tr.result || "").slice(0, 80)}...`,
-                )
                 await this.broadcast({
                   type: "message.part.updated",
                   properties: {
@@ -722,7 +738,6 @@ export class SessionDO extends DurableObject<Env> {
 
     const toolCount = orderedParts.filter((p) => p.type === "tool").length
     console.log(`[handleMessage] completed in ${endTime - now}ms, tools: ${toolCount}, text length: ${fullText.length}`)
-    console.log(`[response] ${fullText.slice(0, 200)}${fullText.length > 200 ? '...' : ''}`)
 
     // ── Step 5: Finalize ─────────────────────────────────────────
 
@@ -767,14 +782,8 @@ export class SessionDO extends DurableObject<Env> {
       },
     })
 
-    // Build all parts in stream order: step-start + reasoning? + orderedParts + step-finish
+    // Build all parts in stream order: orderedParts (includes step-start per round) + step-finish
     const allParts: StoredPart[] = [
-      {
-        id: stepStartPartId,
-        sessionID: sessionId,
-        messageID: assistantMessageId,
-        type: "step-start",
-      },
       ...(reasoningText ? [{
         id: reasoningPartId,
         sessionID: sessionId,
@@ -836,12 +845,6 @@ export class SessionDO extends DurableObject<Env> {
       properties: { sessionID: sessionId },
     })
 
-    return new Response(JSON.stringify(completedAssistant), {
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
-    })
   }
 
   // ── Storage helper ─────────────────────────────────────────────

@@ -112,10 +112,13 @@ const content = await stub.readFile("src/index.ts")
 
 #### Provider Registry — Multi-LLM Support
 
-Supports three providers with two modes:
+Supports three providers with three resolution paths (in priority order):
 
-- **Direct**: Each provider requires its own API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`)
-- **AI Gateway**: When `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` + `CLOUDFLARE_API_TOKEN` are set, all requests route through Cloudflare AI Gateway for observability, caching, and rate limiting. Provider keys become optional (gateway handles auth via stored keys).
+1. **CF Secrets Gateway**: `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` + `CLOUDFLARE_API_TOKEN` → routes through `ai-gateway-provider` for observability, caching, rate limiting. Provider keys optional (BYOK).
+2. **Direct**: Each provider's own API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`).
+3. **AI Binding** (zero-config): When the `[ai]` Worker binding is present, requests fall back to AI Gateway via `env.AI.gateway().getUrl()`. Uses `CLOUDFLARE_GATEWAY_ID` if set, otherwise the auto-created `"default"` gateway. No secrets needed — BYOK handles auth.
+
+Models are fetched dynamically from [models.dev](https://models.dev) with the static catalog as fallback.
 
 ---
 
@@ -124,7 +127,7 @@ Supports three providers with two modes:
 - **Node.js** 20+
 - **Wrangler CLI** v4+ (`npm install -g wrangler`)
 - A **Cloudflare account** with Workers & Durable Objects enabled
-- At least one **LLM provider API key** (Anthropic, OpenAI, or Google)
+- At least one **LLM provider API key** — or the `[ai]` binding with BYOK keys configured in AI Gateway
 
 ---
 
@@ -145,20 +148,23 @@ npm install
 ```bash
 cd packages/opencode-worker
 
-# Required: at least one LLM provider
+# Option A: Direct provider keys (at least one required)
 npx wrangler secret put ANTHROPIC_API_KEY
-
-# Optional: additional providers
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put GOOGLE_API_KEY
 
-# Optional: API authentication
-npx wrangler secret put SERVER_PASSWORD
-
-# Optional: Cloudflare AI Gateway
+# Option B: AI Gateway via CF secrets
 npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
 npx wrangler secret put CLOUDFLARE_GATEWAY_ID
 npx wrangler secret put CLOUDFLARE_API_TOKEN
+
+# Option C: Zero-config — the [ai] binding is already in wrangler.toml.
+# Just configure BYOK provider keys in your AI Gateway dashboard.
+# Optionally set a custom gateway ID:
+# npx wrangler secret put CLOUDFLARE_GATEWAY_ID
+
+# Optional: API authentication
+npx wrangler secret put SERVER_PASSWORD
 ```
 
 ### 3. Deploy
@@ -302,14 +308,14 @@ Set via `wrangler secret put <NAME>`:
 |--------|----------|-------------|
 | `SERVER_PASSWORD` | No | Basic auth password (username defaults to `opencode`) |
 | `SERVER_USERNAME` | No | Basic auth username (defaults to `opencode`) |
-| `ANTHROPIC_API_KEY` | Yes* | Anthropic API key |
-| `OPENAI_API_KEY` | No | OpenAI API key |
-| `GOOGLE_API_KEY` | No | Google AI API key |
-| `CLOUDFLARE_ACCOUNT_ID` | No | Cloudflare account ID (for AI Gateway) |
-| `CLOUDFLARE_GATEWAY_ID` | No | AI Gateway slug |
-| `CLOUDFLARE_API_TOKEN` | No | Cloudflare API token (for AI Gateway) |
+| `ANTHROPIC_API_KEY` | No* | Anthropic API key |
+| `OPENAI_API_KEY` | No* | OpenAI API key |
+| `GOOGLE_API_KEY` | No* | Google AI API key |
+| `CLOUDFLARE_ACCOUNT_ID` | No | Cloudflare account ID (for CF secrets gateway path) |
+| `CLOUDFLARE_GATEWAY_ID` | No | AI Gateway slug (defaults to `"default"` with AI binding) |
+| `CLOUDFLARE_API_TOKEN` | No | Cloudflare API token (for CF secrets gateway path) |
 
-\* At least one LLM provider key is required. When AI Gateway is configured, provider keys become optional.
+\* At least one provider key is required unless using the `[ai]` binding with BYOK keys in AI Gateway, or the CF secrets gateway path.
 
 ---
 
