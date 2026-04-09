@@ -3,10 +3,6 @@ main = "packages/opencode-worker/src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Pre-build: auto-generate skill manifest from skills/*/SKILL.md
-[build]
-command = "node packages/opencode-worker/scripts/gen-skill-manifest.mjs"
-
 # Durable Object bindings
 [[durable_objects.bindings]]
 name = "SESSION_DO"
