@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { z } from "zod"
 import type { Env } from "../env"
 import type { SpaceDO } from "../space/durable-object"
+import type { SessionDO } from "../session/durable-object"
 
 type SpaceApp = Hono<{ Bindings: Env }>
 
@@ -17,6 +18,10 @@ export function spaceRoutes(): SpaceApp {
   function resolveSpace(env: Env, name: string): DurableObjectStub<SpaceDO> {
     const id = env.SPACE_DO.idFromName(name)
     return env.SPACE_DO.get(id) as DurableObjectStub<SpaceDO>
+  }
+
+  function getSessionDO(env: Env): DurableObjectStub<SessionDO> {
+    return env.SESSION_DO.get(env.SESSION_DO.idFromName("main")) as DurableObjectStub<SessionDO>
   }
 
   // ── Get space info ────────────────────────────────────────────
@@ -37,6 +42,7 @@ export function spaceRoutes(): SpaceApp {
 
     const space = resolveSpace(c.env, parsed.data.name)
     const info = await space.getInfo()
+    await getSessionDO(c.env).registerSpace(parsed.data.name)
     return c.json({ name: parsed.data.name, ...info }, 201)
   })
 

@@ -9,6 +9,7 @@ import { providerRoutes } from "./routes/provider"
 import { projectRoutes } from "./routes/project"
 import { stubRoutes } from "./routes/stubs"
 import { spaceRoutes } from "./routes/space"
+import { dashboardApiRoutes, dashboardHtml } from "./routes/dashboard"
 import type { SessionDO as _SessionDO } from "./session/durable-object"
 import type { SpaceDO as _SpaceDO } from "./space/durable-object"
 
@@ -60,6 +61,13 @@ app.use("*", async (c, next) => {
 // ── Routes ────────────────────────────────────────────────────────
 // Mounted to match the upstream OpenCode server route tree so the
 // stock TUI / web client can connect without modification.
+
+// Dashboard UI at root
+app.get("/", (c) => {
+  const host = c.req.header("host") ?? "localhost"
+  return c.html(dashboardHtml(host))
+})
+app.route("/api/spaces", dashboardApiRoutes())
 
 app.route("/global", globalRoutes())
 app.route("/project", projectRoutes())

@@ -111,6 +111,12 @@ export class SessionDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       `CREATE INDEX IF NOT EXISTS idx_session_spaces_session ON session_spaces(session_id)`,
     )
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS known_spaces (
+        name TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      )
+    `)
   }
 
   // ── fetch() — routes SSE + message requests ────────────────────
@@ -318,6 +324,26 @@ export class SessionDO extends DurableObject<Env> {
       sessionId: r.session_id as string,
       spaceName: r.space_name as string,
     }))
+  }
+
+  listAllSpaces(): string[] {
+    const rows = this.ctx.storage.sql
+      .exec(
+        `SELECT name FROM known_spaces
+         UNION
+         SELECT DISTINCT space_name AS name FROM session_spaces
+         ORDER BY name`,
+      )
+      .toArray()
+    return rows.map((r) => r.name as string)
+  }
+
+  registerSpace(name: string): void {
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO known_spaces (name, created_at) VALUES (?, ?)`,
+      name,
+      Date.now(),
+    )
   }
 
   // ── Get Messages (V2 format for TUI) ──────────────────────────
