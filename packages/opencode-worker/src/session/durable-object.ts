@@ -99,8 +99,6 @@ export class SessionDO extends DurableObject<Env> {
         PRIMARY KEY (session_id, key)
       )
     `)
-    // Migrate old session_spaces schema (had space_url, space_api_key columns)
-    this.ctx.storage.sql.exec(`DROP TABLE IF EXISTS session_spaces`)
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS session_spaces (
         session_id TEXT NOT NULL,
